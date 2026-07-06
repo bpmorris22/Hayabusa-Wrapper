@@ -113,15 +113,6 @@
   .sep{display:inline-block;width:1px;height:18px;background:#30363d;margin:0 6px;vertical-align:middle}
   .tfilt{display:inline-block;background:#10263f;border:1px solid #1f6feb;border-radius:12px;padding:2px 10px;font-size:11px;margin-left:6px}
   .tfilt .x{cursor:pointer;color:#ff6b6b;margin-left:6px;font-weight:700}
-  .modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.66);z-index:1000;overflow:auto}
-  .modal .mcard{max-width:780px;margin:36px auto;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px 22px}
-  .modal h2{margin:0 0 6px;font-size:18px;font-weight:600}
-  .modal h3{margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e}
-  .modal ul{margin:4px 0;padding-left:20px}.modal li{margin:3px 0;font-size:13px}
-  .modal p{font-size:13px;margin:6px 0}
-  .modal code{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:2px 6px;font-family:Consolas,monospace;font-size:12px}
-  .modal .x{float:right;cursor:pointer;color:#8b949e;font-size:22px;line-height:1}.modal .x:hover{color:#e6edf3}
-  .modal .gh{font-family:Consolas,monospace;font-size:12px}
 </style>
 </head>
 <body>
@@ -130,7 +121,7 @@
   <span class="pill" id="verpill">version: checking&hellip;</span>
   <span class="pill" id="srcpill">no data loaded</span>
   <span style="float:right">
-    <button class="btn" id="helpBtn" onclick="openHelp()" title="Help, about &amp; GitHub link">Help</button>
+    <button class="btn primary hide" id="selfUpd" onclick="doSelfUpdate()" title="A newer version is available on GitHub">Update</button>
     <button class="btn" id="fdown" title="Smaller text">A&minus;</button>
     <button class="btn" id="fup" title="Larger text">A+</button>
   </span>
@@ -265,7 +256,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.1.1";
+var APP_VERSION = "0.1.2";
 var KNOWN_LATEST = "3.3.0";                                                        // baseline as of 2026-07-06
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -472,7 +463,13 @@ function htaFolder(){
 function resolveExe(){
   var fso=new ActiveXObject("Scripting.FileSystemObject");
   var dir=htaFolder(), cands=[];
-  if(dir){ cands.push(dir+"\\hayabusa.exe"); cands.push(dir+"\\hayabusa\\hayabusa.exe"); }
+  if(dir){ cands.push(dir+"\\hayabusa.exe"); cands.push(dir+"\\hayabusa\\hayabusa.exe");
+    // release zips ship a VERSIONED exe (hayabusa-<ver>-win-<arch>.exe) — accept it directly so the
+    // plain hayabusa.exe alias is optional
+    try{ var en=new Enumerator(fso.GetFolder(dir).Files);
+      for(; !en.atEnd(); en.moveNext()){ var fi=en.item();
+        if(/^hayabusa-.*\.exe$/i.test(fi.Name+"")) cands.push(fi.Path+""); } }catch(eg){}
+  }
   cands.push("C:\\Tools\\hayabusa\\hayabusa.exe");
   cands.push("C:\\ZimmermanTools\\hayabusa\\hayabusa.exe");
   for(var i=0;i<cands.length;i++){ if(fso.FileExists(cands[i])){ EXE=cands[i]; EXE_DIR=parentDir(cands[i]); return true; } }
@@ -1508,43 +1505,55 @@ function dayNum(s){ if(!s) return 0; var m=String(s).match(/(\d{4})-(\d{1,2})-(\
   function p(x){ x=String(x); return x.length<2?("0"+x):x; }
   return Number(m[1]+p(m[2])+p(m[3])); }
 
-/* ---------- help / about overlay ---------- */
-var GITHUB="https://github.com/bpmorris22/Hayabusa-Wrapper";
-function openUrl(u){ try{ new ActiveXObject("WScript.Shell").Run('"'+u+'"',1,false); }catch(e){ setStatus("Could not open browser: "+e.message,"err"); } }
-function openHelp(){ try{ $("helpVer").innerHTML="v"+APP_VERSION; }catch(e){} showEl("helpModal",true); }
-function closeHelp(){ showEl("helpModal",false); }
-
-window.onload=init;
+/* ---------- self-update: quiet check of this app's GitHub Releases; one-click download of a newer .hta ---------- */
+var SELF_REPO="bpmorris22/Hayabusa-Wrapper", SELF_HTA="Hayabusa-Wrapper.hta", SELF_LATEST="", SELF_ASSET_URL="";
+function selfVerNewer(r,l){ var a=String(r).split("."),b=String(l).split("."),n=Math.max(a.length,b.length);
+  for(var i=0;i<n;i++){ var x=parseInt(a[i],10)||0,y=parseInt(b[i],10)||0; if(x!==y) return x>y; } return false; }
+function selfPath(){ try{ var p=decodeURIComponent(location.pathname+"").replace(/^\//,"").replace(/\//g,"\\");
+  if(/\.hta$/i.test(p) && fileExists(p)) return p; }catch(e){} return (htaFolder()||"")+"\\"+SELF_HTA; }
+function checkSelfUpdate(){
+  try{
+    var x=new ActiveXObject("MSXML2.XMLHTTP.6.0");
+    x.open("GET","https://api.github.com/repos/"+SELF_REPO+"/releases/latest",true);
+    try{ x.setRequestHeader("User-Agent",SELF_HTA); }catch(eh){}
+    x.onreadystatechange=function(){ if(x.readyState!==4) return;
+      try{ if(x.status!==200) return; var t=x.responseText+"";
+        var m=t.match(/"tag_name"\s*:\s*"v?([0-9.]+)"/i); if(!m) return;
+        var latest=m[1]; if(!selfVerNewer(latest,APP_VERSION)) return;
+        var url="", re=/"browser_download_url"\s*:\s*"([^"]+\.hta)"/ig, mm;
+        while((mm=re.exec(t))){ if(mm[1].toLowerCase().indexOf(SELF_HTA.toLowerCase())>=0){ url=mm[1]; break; } if(!url) url=mm[1]; }
+        if(!url) url="https://github.com/"+SELF_REPO+"/releases/download/v"+latest+"/"+SELF_HTA;
+        SELF_LATEST=latest; SELF_ASSET_URL=url;
+        var b=$("selfUpd"); if(b){ b.innerHTML="Update to v"+latest; b.className="btn primary";
+          b.title="A newer "+SELF_HTA+" (v"+latest+") is on GitHub — click to download & replace this file"; }
+      }catch(e){} };
+    x.send();
+  }catch(e){}
+}
+function doSelfUpdate(){
+  if(!SELF_ASSET_URL){ setStatus("No update available (or offline).","muted"); return; }
+  var target=selfPath();
+  if(!target || !/\.hta$/i.test(target)){ setStatus("Can't locate this app's own file to update in place.","err"); return; }
+  if(!confirm("Download "+SELF_HTA+" v"+SELF_LATEST+" and replace this file?\n\n"+target+"\n\nAfter it downloads, close and reopen the app to run the new version.")) return;
+  setStatus("Downloading v"+SELF_LATEST+"…","muted");
+  var fso=new ActiveXObject("Scripting.FileSystemObject"), tmp=fso.GetSpecialFolder(2)+"";
+  var ps1=tmp+"\\selfupd_"+new Date().getTime()+Math.floor(Math.random()*100000)+".ps1";
+  var tq=String(target).replace(/'/g,"''"), uq=String(SELF_ASSET_URL).replace(/'/g,"''");
+  var L=["$ErrorActionPreference='Stop'","[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12",
+    "$u='"+uq+"'","$t='"+tq+"'","$tmp=Join-Path $env:TEMP ('selfupd_'+[guid]::NewGuid().ToString('N')+'.hta')",
+    "Invoke-WebRequest -Uri $u -OutFile $tmp -Headers @{ 'User-Agent'='"+SELF_HTA+"' }",
+    "if((Get-Item $tmp).Length -lt 2000){ throw 'downloaded file too small' }",
+    "Copy-Item $tmp $t -Force","Remove-Item $tmp -Force -ErrorAction SilentlyContinue","Write-Output 'SELFUPD_OK'"];
+  try{ var f=fso.CreateTextFile(ps1,true); f.Write(L.join("\r\n")); f.Close(); }catch(ew){ setStatus("Self-update stage failed: "+ew.message,"err"); return; }
+  try{ var r=runBat(['powershell -NoProfile -ExecutionPolicy Bypass -File "'+ps1+'" > "__LOG__" 2>&1']);
+    try{ fso.DeleteFile(ps1); }catch(e0){}
+    if((r.log+"").indexOf("SELFUPD_OK")>=0){ var b=$("selfUpd"); if(b) b.className="btn primary hide";
+      setStatus("Updated to v"+SELF_LATEST+" — CLOSE and reopen the app to run the new version.","ok");
+      try{ alert("Update installed (v"+SELF_LATEST+").\n\nClose and reopen "+SELF_HTA+" to run the new version."); }catch(e){}
+    } else { appendLog("--- self-update ---\n"+r.log); setStatus("Self-update failed — see log; download manually from GitHub if needed.","err"); }
+  }catch(e){ setStatus("Self-update failed: "+e.message,"err"); }
+}
+window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }catch(e){} };
 </script>
-<div id="helpModal" class="modal hide" onclick="if((event.srcElement||{}).id==='helpModal')closeHelp()">
-  <div class="mcard">
-    <span class="x" onclick="closeHelp()" title="Close">&times;</span>
-    <h2>Hayabusa Wrapper <span class="muted" style="font-size:13px;font-weight:400" id="helpVer"></span></h2>
-    <div class="gh muted">GitHub: <span class="lnk" onclick="openUrl(GITHUB)">https://github.com/bpmorris22/Hayabusa-Wrapper</span></div>
-    <p>A single-file GUI for triaging <b>Windows event logs</b> with Yamato-Security Hayabusa — runs <code>csv-timeline</code> for you and turns the Sigma-detection CSV into an interactive, severity-aware triage view.</p>
-    <h3>Quick start</h3>
-    <ul>
-      <li>Put this <code>.hta</code> next to <code>hayabusa.exe</code> (with its <code>rules\</code> + <code>config\</code>), or use <b>Download Hayabusa</b>. Refresh detections with <b>Update rules</b>.</li>
-      <li>Point at <code>C:\Windows\System32\winevt\Logs</code> (run elevated), a collected <code>.evtx</code> tree, or a single <code>.evtx</code> — then <b>Process → analyze</b>.</li>
-      <li>Or <b>Load existing CSV…</b> to view a Hayabusa csv-timeline CSV you already have.</li>
-    </ul>
-    <h3>Views</h3>
-    <ul>
-      <li><b>Chronological</b> (default), <b>By severity</b> (collapsible groups), and <b>By rule title</b> (aggregated). IOC list, noise/known-FP list, and a detail pane are built in.</li>
-    </ul>
-    <h3>Command line</h3>
-    <p><code>mshta "Hayabusa-Wrapper.hta" "&lt;inputOrCsv&gt;" ["&lt;outDir&gt;"] [/auto]</code></p>
-    <ul>
-      <li><code>&lt;input&gt;</code> — a <code>.csv</code> (auto-loads) or an <code>.evtx</code> file / directory (prefilled; processed with <code>/auto</code>).</li>
-      <li><code>&lt;outDir&gt;</code> — CSV output directory (optional). &nbsp; <code>/auto</code> — process immediately.</li>
-    </ul>
-    <h3>Notes</h3>
-    <ul>
-      <li>Runs <code>--no-wizard --ISO-8601</code> (non-interactive, always-UTC <code>…Z</code>) and updates rules first by default. Validated against Hayabusa 3.10.0.</li>
-    </ul>
-    <p class="muted" style="font-size:11px">MIT © 2026 Ben Morris — click the link above for the full README &amp; releases.</p>
-  </div>
-</div>
-
 </body>
 </html>
