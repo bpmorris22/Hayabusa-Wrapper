@@ -42,7 +42,8 @@ No install, no dependencies, no framework: one `.hta` that runs on any Windows b
 mshta.exe "Hayabusa-Wrapper.hta" "<input>" ["<outDir>"] [/auto] [/min:LEVEL] [/profile:NAME]
 ```
 - `<input>` — a `.csv` (auto-loaded into the viewer) or an `.evtx` file / directory (prefilled; processed if `/auto`).
-- `<outDir>` — CSV output directory (optional).
+- `<outDir>` — CSV output directory (optional; defaults to `_Processed\<host>\Hayabusa` next to the app).
+- **Target hostname** is required before processing — it names the `_Processed\<host>\Hayabusa` output folder next to the app (family convention shared with the DFIR-Artifact-Finder, so processed evidence is visible per host per tool). Guessed from `Collection-<host>-…` paths, a passed `_Processed\<host>\` outDir, or this machine's name for live paths — overwrite the guess if it's wrong.
 - `/auto` — process immediately (evtx input only).
 
 ## Notes & limitations
