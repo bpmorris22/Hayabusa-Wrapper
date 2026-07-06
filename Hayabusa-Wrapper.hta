@@ -270,7 +270,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.5.0";
+var APP_VERSION = "0.6.0";
 var KNOWN_LATEST = "3.3.0";                                                        // baseline as of 2026-07-06
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -822,7 +822,46 @@ function writeRunInfo(outdir, input, freshFiles){
     arr.push({app:APP_NAME, appVersion:APP_VERSION, host:sanitHost($("hostName").value),
               input:String(input||""), finishedUtc:iso, files:names});
     writeUtf8(p, JSON.stringify(arr,null,2));
+    RUNINFO_LAST={path:p, iso:iso};
   }catch(e){}
+}
+var RUNINFO_LAST=null;   // the entry writeRunInfo just appended — patched with a triage summary after the auto-load
+function patchRunInfoSummary(summary){
+  /* second-phase runinfo write (family, 2026-07-07): the scored rows only exist after the
+     auto-load that follows a run, so the headline triage numbers are patched onto the entry
+     writeRunInfo appended moments earlier. The Artifact-Finder renders these in its
+     per-host triage summary. Best-effort — a missing summary just shows as counts-only. */
+  try{
+    if(!RUNINFO_LAST || !summary) return;
+    var arr=JSON.parse(readUtf8(RUNINFO_LAST.path));
+    if(!arr || arr.length==null) return;
+    for(var i=arr.length-1;i>=0;i--){ var e=arr[i];
+      if(e && e.app===APP_NAME && e.finishedUtc===RUNINFO_LAST.iso){ e.summary=summary; break; } }
+    writeUtf8(RUNINFO_LAST.path, JSON.stringify(arr,null,2));
+  }catch(e){}
+}
+function buildRunSummary(){
+  /* headline triage numbers from the ingested rows: detection count, per-severity counts
+     (rec.lkey: crit/high/med/low/info), top-3 most-frequent rule titles among crit+high
+     events as "title (xN)". Empty top when nothing crit/high fired. */
+  try{
+    if(!ROWS.length) return null;
+    var crit=0, high=0, med=0, low=0, i, freq={}, titles=[];
+    for(i=0;i<ROWS.length;i++){ var r=ROWS[i];
+      if(r.lkey==="crit") crit++;
+      else if(r.lkey==="high") high++;
+      else if(r.lkey==="med") med++;
+      else if(r.lkey==="low") low++;
+      if(r.lkey==="crit"||r.lkey==="high"){
+        var k="t_"+(r.title||"(untitled)");   // prefix keeps rule titles clear of Object.prototype names
+        if(!(k in freq)){ freq[k]=0; titles.push(r.title||"(untitled)"); }
+        freq[k]++;
+      } }
+    titles.sort(function(a,b){ return freq["t_"+b]-freq["t_"+a]; });
+    var top=[];
+    for(i=0;i<titles.length && top.length<3;i++) top.push(titles[i]+" (x"+freq["t_"+titles[i]]+")");
+    return {detections:ROWS.length, crit:crit, high:high, med:med, low:low, top:top};
+  }catch(e){ return null; }
 }
 
 function processHb(){
@@ -873,12 +912,14 @@ function processHbDone(log,outdir,csvOut){
     if(fileSize(csvOut)<3){
       populateProduced(listCsvFiles(outdir));
       setStatus("Hayabusa ran OK but found 0 detections in this input at min-level '"+$("optMin").value+"'. Point at a broader log set (or lower the min level) and re-run.","ok");
+      patchRunInfoSummary({detections:0, crit:0, high:0, med:0, low:0, top:[]});
       return;
     }
     populateProduced(listCsvFiles(outdir));
     try{ $("producedSel").value=csvOut; }catch(e){}
     setStatus("Timeline produced: "+baseName(csvOut)+" — loading…","ok");
     loadCsvFile(csvOut);
+    patchRunInfoSummary(buildRunSummary());   // rows are ingested now — add the severity headline to the runinfo entry
     return;
   }
   // no output — diagnose
@@ -1890,7 +1931,7 @@ window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }
       <li><code>&lt;outDir&gt;</code> — CSV output directory (optional). &nbsp; <code>/auto</code> — process immediately.</li>
       <li><b>Target hostname</b> is required before processing — it names the output folder <code>_Processed\&lt;host&gt;\Hayabusa</code> next to this app (family convention shared with the Artifact-Finder). It is guessed from <code>Collection-&lt;host&gt;-…</code> paths, a passed <code>_Processed\&lt;host&gt;\</code> outDir, or this machine's name for live paths — overwrite the guess if it's wrong.</li>
       <li><b>Shared IOC list</b>: an <code>IOC.txt</code> next to this app (one term per line, <code>#</code> comments) is auto-merged into the IOC box at launch — one list covers the whole toolkit. Terms you paste locally are kept.</li>
-      <li>After every successful run a <code>runinfo.json</code> provenance entry (app, host, input path, files) is appended in the output folder — the Artifact-Finder uses it to show processed state even for runs done outside the finder.</li>
+      <li>After every successful run a <code>runinfo.json</code> provenance entry (app, host, input path, files) is appended in the output folder, including a <b>triage summary</b> (detections, crit/high/med/low counts, top rules) — the Artifact-Finder shows these per host in its inventory, even for runs done outside the finder.</li>
     </ul>
     <h3>Notes</h3>
     <ul>
