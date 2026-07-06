@@ -85,6 +85,8 @@
   th,td{text-align:left;padding:4px 7px;border-bottom:1px solid #30363d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   th{background:#1c2330;cursor:pointer;color:#c9d1d9;position:relative;z-index:3;box-shadow:0 1px 0 #30363d}
   th:hover{color:#58a6ff}
+  .cgrip{position:absolute;top:0;right:-4px;width:8px;height:100%;cursor:col-resize;z-index:6}
+  .cgrip:hover{background:#58a6ff;filter:alpha(opacity=45);opacity:.45}
   td{max-width:420px}
   tr.row-crit td{background:#2a1416}
   tr.row-high td{background:#241c12}
@@ -266,7 +268,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.2.0";
+var APP_VERSION = "0.3.0";
 var KNOWN_LATEST = "3.3.0";                                                        // baseline as of 2026-07-06
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -299,6 +301,8 @@ var GSRCIDX = -1, SRCFILTER = "";
 var BUSY = false;
 var PRODUCED = [];
 var GOPEN = {crit:1,high:1,med:1,low:0,info:0};   // severity-group collapse state
+var COLW = {};                       // per-view column px widths once the user resizes (keys: chrono|sev|title|generic; persisted in a sidecar file)
+var DRAG = null;                     // active column-drag state
 
 /* ---------- level metadata ---------- */
 var LVLKEYS = ["crit","high","med","low","info"];
@@ -1095,9 +1099,12 @@ function renderChrono(){
   $("tbl").innerHTML=html;
   $("count").innerHTML=nf(rows.length)+" detections"+(shown<rows.length?(" (showing "+nf(shown)+")"):"");
   var ths=$("tbl").getElementsByTagName("th");
-  for(var j=0;j<ths.length;j++){ ths[j].onclick=function(){ var kk=parseInt(this.getAttribute("data-k"),10);
+  for(var j=0;j<ths.length;j++){ ths[j].onclick=function(e){ e=e||window.event; var t=e.target||e.srcElement;
+    if(t && /\bcgrip\b/.test(t.className+"")) return;                       // grip clicks never sort
+    var kk=parseInt(this.getAttribute("data-k"),10);
     if(SORTKEY===kk) SORTDIR*=-1; else { SORTKEY=kk; SORTDIR=1; } renderChrono(); }; }
   applyFreeze();
+  setupColResize();
   window.__viewRows=rows.slice(0,shown);
   window.__fullRows=rows;
 }
@@ -1142,6 +1149,7 @@ function renderSev(){
   $("tbl").innerHTML=html;
   $("count").innerHTML=nf(total)+" detections"+(capped?" (some groups capped)":"");
   applyFreeze();
+  setupColResize();
   window.__viewRows=display;
   window.__fullRows=rows;
 }
@@ -1194,9 +1202,12 @@ function renderTitle(){
   $("tbl").innerHTML=html;
   $("count").innerHTML=nf(groups.length)+" rules"+(shown<groups.length?(" (showing "+nf(shown)+")"):"");
   var ths=$("tbl").getElementsByTagName("th");
-  for(var j=0;j<ths.length;j++){ ths[j].onclick=function(){ var kk=parseInt(this.getAttribute("data-k"),10);
+  for(var j=0;j<ths.length;j++){ ths[j].onclick=function(e){ e=e||window.event; var t=e.target||e.srcElement;
+    if(t && /\bcgrip\b/.test(t.className+"")) return;                       // grip clicks never sort
+    var kk=parseInt(this.getAttribute("data-k"),10);
     if(TSORTKEY===kk) TSORTDIR*=-1; else { TSORTKEY=kk; TSORTDIR=1; } renderTitle(); }; }
   applyFreeze();
+  setupColResize();
   window.__titleRows=groups.slice(0,shown);
   window.__titleFull=groups;
 }
@@ -1205,6 +1216,100 @@ function applyFreeze(){
   var sc=$("tblScroll"); if(!sc) return;
   var ths=$("tbl").getElementsByTagName("th"); var y=sc.scrollTop;
   for(var i=0;i<ths.length;i++){ ths[i].style.top=y+"px"; }
+}
+
+/* ---------- resizable columns (drag the th edge; double-click the edge to reset) ----------
+   Ported from DFIR-Artifact-Finder v0.2.1. Widths are kept PER VIEW (chrono/sev/title/generic)
+   because the views have different column sets; a stored array whose length doesn't match the
+   current th count is ignored (auto-reset). Widths persist in a sidecar file next to the .hta. */
+function colwKey(){ return (MODE==="generic") ? "generic" : VIEW; }
+function colwFile(){ var d=htaFolder(); return d?(d+"\\Hayabusa-Wrapper.colw.txt"):""; }
+function saveColw(){
+  var p=colwFile(); if(!p) return;
+  var out=[],k;
+  for(k in COLW){ if(COLW.hasOwnProperty(k)&&COLW[k]&&COLW[k].length) out.push(k+"="+COLW[k].join(",")); }
+  try{
+    if(out.length) writeUtf8(p,out.join("\r\n"));
+    else if(fileExists(p)) new ActiveXObject("Scripting.FileSystemObject").DeleteFile(p);
+  }catch(e){}
+}
+function loadColw(){
+  var p=colwFile(); if(!p||!fileExists(p)) return;
+  try{
+    var lines=readUtf8(p).split(/\r?\n/);
+    for(var i=0;i<lines.length;i++){ var ln=trimStr(lines[i]); if(!ln) continue;
+      var eq=ln.indexOf("="); if(eq<1) continue;
+      var key=ln.substring(0,eq), parts=ln.substring(eq+1).split(","), a=[], ok=true;
+      for(var j=0;j<parts.length;j++){ var n=parseInt(parts[j],10);
+        if(!(n>=40&&n<=1600)){ ok=false; break; } a.push(n); }
+      if(ok&&a.length) COLW[key]=a;
+    }
+  }catch(e){}
+}
+function curZoom(){
+  try{ var el=$("content");
+    var z=parseFloat(el.style.zoom||(el.currentStyle&&el.currentStyle.zoom)||"");
+    if(!z && window.getComputedStyle) z=parseFloat(getComputedStyle(el).zoom);
+    return (z&&z>0)?z:1;
+  }catch(e){ return 1; }
+}
+function setupColResize(){
+  var tbl=$("tbl"); if(!tbl) return;
+  var ths=tbl.getElementsByTagName("th"); if(!ths.length) return;
+  var key=colwKey(), w=COLW[key];
+  if(w && w.length===ths.length){
+    tbl.style.tableLayout="fixed"; tbl.style.width="auto";
+    for(var j=0;j<ths.length;j++) ths[j].style.width=w[j]+"px";
+  } else {
+    tbl.style.tableLayout=""; tbl.style.width="";
+  }
+  for(var i=0;i<ths.length;i++){
+    var g=document.createElement("div");
+    g.className="cgrip"; g.setAttribute("data-ci",String(i));
+    g.title="Drag to resize column — double-click to reset all widths";
+    g.onmousedown=gripDown; g.ondblclick=gripReset;
+    ths[i].appendChild(g);
+  }
+}
+function gripDown(e){
+  e=e||window.event;
+  var ci=parseInt(this.getAttribute("data-ci"),10);
+  var tbl=$("tbl"), ths=tbl.getElementsByTagName("th");
+  if(isNaN(ci)||ci<0||ci>=ths.length) return false;
+  var key=colwKey();
+  if(!COLW[key] || COLW[key].length!==ths.length){    // first drag: freeze the browser's current widths
+    var w=[]; for(var i=0;i<ths.length;i++) w.push(ths[i].offsetWidth);
+    COLW[key]=w;
+    tbl.style.tableLayout="fixed"; tbl.style.width="auto";
+    for(var j=0;j<ths.length;j++) ths[j].style.width=w[j]+"px";
+  }
+  DRAG={key:key, ci:ci, x:(e.clientX||0), w:COLW[key][ci], th:ths[ci], z:curZoom()};
+  document.onmousemove=gripMove; document.onmouseup=gripUp;
+  document.onselectstart=function(){ return false; };
+  if(e.preventDefault) e.preventDefault(); e.returnValue=false;
+  if(e.stopPropagation) e.stopPropagation(); e.cancelBubble=true;
+  return false;
+}
+function gripMove(e){
+  e=e||window.event; if(!DRAG) return false;
+  var w=Math.round(DRAG.w+((e.clientX||0)-DRAG.x)/DRAG.z);
+  if(w<40) w=40; if(w>1600) w=1600;
+  COLW[DRAG.key][DRAG.ci]=w; DRAG.th.style.width=w+"px";
+  return false;
+}
+function gripUp(){
+  document.onmousemove=null; document.onmouseup=null; document.onselectstart=null;
+  if(DRAG){ DRAG=null; try{ saveColw(); }catch(e){} }
+}
+function gripReset(e){
+  e=e||window.event;
+  document.onmousemove=null; document.onmouseup=null; document.onselectstart=null; DRAG=null;
+  COLW[colwKey()]=null; try{ saveColw(); }catch(er){}
+  var tbl=$("tbl"); if(tbl){ tbl.style.tableLayout=""; tbl.style.width=""; }
+  render();
+  setStatus("Column widths reset","ok");
+  if(e){ if(e.stopPropagation) e.stopPropagation(); e.cancelBubble=true; }
+  return false;
 }
 
 /* ---------- detail panes ---------- */
@@ -1319,9 +1424,12 @@ function renderGeneric(){
   h+="</tbody>"; $("tbl").innerHTML=h;
   $("count").innerHTML=nf(rows.length)+" rows"+(shown<rows.length?(" (showing "+nf(shown)+")"):"");
   var ths=$("tbl").getElementsByTagName("th");
-  for(var i2=0;i2<ths.length;i2++){ ths[i2].onclick=function(){ var kk=parseInt(this.getAttribute("data-k"),10);
+  for(var i2=0;i2<ths.length;i2++){ ths[i2].onclick=function(e){ e=e||window.event; var t=e.target||e.srcElement;
+    if(t && /\bcgrip\b/.test(t.className+"")) return;                       // grip clicks never sort
+    var kk=parseInt(this.getAttribute("data-k"),10);
     if(GSORTKEY===kk) GSORTDIR*=-1; else { GSORTKEY=kk; GSORTDIR=1; } renderGeneric(); }; }
   applyFreeze();
+  setupColResize();
   window.__genRows=rows;
 }
 function setMode(m){
@@ -1498,6 +1606,7 @@ function init(){
   try{ document.title="Hayabusa Wrapper v"+APP_VERSION; }catch(e){}
   $("maxrowLbl").innerHTML=nf(MAXROWS);
   $("tblScroll").onscroll=applyFreeze;
+  loadColw();
   var fso=new ActiveXObject("Scripting.FileSystemObject");
   $("inPath").value=LIVE_LOGS; $("inMode").value="d";
   var expBase=htaFolder()||fso.GetSpecialFolder(2)+"";
@@ -1578,6 +1687,7 @@ function init(){
 
   /* click delegation: data-q → search; title row → title detail; group header → collapse; detection row → detail */
   document.onclick=function(e){ e=e||window.event; var t=e.target||e.srcElement;
+    if(t && /\bcgrip\b/.test(t.className+"")) return;                       // column-resize grip — never a row/search click
     var q=t&&t.getAttribute?t.getAttribute("data-q"):null;
     if(q){ $("q").value=q; QUERY=q.toLowerCase(); render(); return; }
     if(MODE!=="hb") return;
@@ -1687,6 +1797,7 @@ window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }
     <h3>Views</h3>
     <ul>
       <li><b>Chronological</b> (default), <b>By severity</b> (collapsible groups), and <b>By rule title</b> (aggregated). IOC list, noise/known-FP list, and a detail pane are built in.</li>
+      <li><b>Resizable columns</b> — drag a column-header edge to resize (widths are remembered per view); double-click the edge to reset all widths.</li>
     </ul>
     <h3>Command line</h3>
     <p><code>mshta "Hayabusa-Wrapper.hta" "&lt;inputOrCsv&gt;" ["&lt;outDir&gt;"] [/auto]</code></p>

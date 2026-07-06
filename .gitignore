@@ -9,3 +9,4 @@ Exported CSVs/
 logs/
 mock-*.html
 defender-exclusion-added.txt
+*.colw.txt

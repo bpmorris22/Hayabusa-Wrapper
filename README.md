@@ -21,6 +21,7 @@ No install, no dependencies, no framework: one `.hta` that runs on any Windows b
 - **IOC / keyword list** — paste or load terms; matched case-insensitively against rule title, details, extra fields, computer, channel and rule id; matches score +3 and light up red.
 - **Noise / known-FP list** — a separate loadable list to suppress environment-specific false positives (keep them here, not baked into the tool).
 - **Filters** — level buttons with live counts, free-text search across all columns, computer filter, UTC date range.
+- **Resizable columns** (v0.3.0) — drag a column-header edge to resize; widths are remembered per view (chronological / severity / rule-title / generic) across restarts; double-click the edge to reset.
 - **Detail pane** — click any detection: every field split out, `Details` / `ExtraFieldInfo` broken into their ` ¦ `-joined sub-fields, IOC substrings highlighted; verbose/super-verbose profile extra columns surfaced automatically.
 - **Reporting** — export the filtered view (any view) to CSV, or copy formatted lines for case notes.
 - **Command-line invocation** — `mshta Hayabusa-Wrapper.hta "<inputOrCsv>" ["<outDir>"] [/auto]` — hand it a pre-made CSV to open straight to the viewer, or an `.evtx` folder with `/auto` to process then display. Built so a separate artifact-finder can drive it.
