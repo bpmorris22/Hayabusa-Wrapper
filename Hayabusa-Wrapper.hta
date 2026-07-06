@@ -113,6 +113,15 @@
   .sep{display:inline-block;width:1px;height:18px;background:#30363d;margin:0 6px;vertical-align:middle}
   .tfilt{display:inline-block;background:#10263f;border:1px solid #1f6feb;border-radius:12px;padding:2px 10px;font-size:11px;margin-left:6px}
   .tfilt .x{cursor:pointer;color:#ff6b6b;margin-left:6px;font-weight:700}
+  .modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.66);z-index:1000;overflow:auto}
+  .modal .mcard{max-width:780px;margin:36px auto;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px 22px}
+  .modal h2{margin:0 0 6px;font-size:18px;font-weight:600}
+  .modal h3{margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e}
+  .modal ul{margin:4px 0;padding-left:20px}.modal li{margin:3px 0;font-size:13px}
+  .modal p{font-size:13px;margin:6px 0}
+  .modal code{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:2px 6px;font-family:Consolas,monospace;font-size:12px}
+  .modal .x{float:right;cursor:pointer;color:#8b949e;font-size:22px;line-height:1}.modal .x:hover{color:#e6edf3}
+  .modal .gh{font-family:Consolas,monospace;font-size:12px}
 </style>
 </head>
 <body>
@@ -121,6 +130,7 @@
   <span class="pill" id="verpill">version: checking&hellip;</span>
   <span class="pill" id="srcpill">no data loaded</span>
   <span style="float:right">
+    <button class="btn" id="helpBtn" onclick="openHelp()" title="Help, about &amp; GitHub link">Help</button>
     <button class="btn" id="fdown" title="Smaller text">A&minus;</button>
     <button class="btn" id="fup" title="Larger text">A+</button>
   </span>
@@ -255,7 +265,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.1.0";
+var APP_VERSION = "0.1.1";
 var KNOWN_LATEST = "3.3.0";                                                        // baseline as of 2026-07-06
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -1297,8 +1307,34 @@ function applyNoise(){
      positional-1 : .csv → auto-load;  .evtx / directory → prefill (+process if /auto)
      positional-2 : output dir
      /auto        : process immediately (evtx input only) */
+/* HTA:APPLICATION.commandLine is UNDEFINED when the document runs in standards mode (x-ua-compatible
+   IE=edge → docMode 9+) — a long-standing mshta quirk that silently kills CLI args. Recover the real
+   command line from WMI: newest mshta.exe process whose command line names this .hta file. (If two
+   instances of the same wrapper spawn in the same instant the newest wins — acceptable for user-paced
+   launches from the artifact finder.) */
+function getCommandLine(){
+  try{ var cl=hayabusaHta.commandLine+""; if(cl && cl!=="undefined") return cl; }catch(e){}
+  try{
+    var lp=decodeURIComponent(location.pathname+"").replace(/^\//,"").replace(/\//g,"\\");
+    var fn=lp.substring(lp.lastIndexOf("\\")+1).toLowerCase();
+    if(!fn) return "";
+    var loc=new ActiveXObject("WbemScripting.SWbemLocator");
+    var svc=loc.ConnectServer(".","root\\cimv2");
+    var q=svc.ExecQuery("SELECT CommandLine,CreationDate FROM Win32_Process WHERE Name='mshta.exe'");
+    var best="", bestDate="";
+    var en=new Enumerator(q);
+    for(; !en.atEnd(); en.moveNext()){
+      var pr=en.item(); var pcl=(pr.CommandLine==null?"":pr.CommandLine+"");
+      if(pcl.toLowerCase().indexOf(fn)<0) continue;
+      var cd=(pr.CreationDate==null?"":pr.CreationDate+"");
+      if(!best || cd>bestDate){ best=pcl; bestDate=cd; }
+    }
+    return best;
+  }catch(e2){}
+  return "";
+}
 function tokenizeCmdTail(){
-  var cl=""; try{ cl=hayabusaHta.commandLine+""; }catch(e){ return []; }
+  var cl=getCommandLine(); if(!cl) return [];
   // drop everything up to and including the .hta" token
   var m=cl.match(/\.hta"?/i);
   var tail = m ? cl.substring(m.index+m[0].length) : cl;
@@ -1472,7 +1508,43 @@ function dayNum(s){ if(!s) return 0; var m=String(s).match(/(\d{4})-(\d{1,2})-(\
   function p(x){ x=String(x); return x.length<2?("0"+x):x; }
   return Number(m[1]+p(m[2])+p(m[3])); }
 
+/* ---------- help / about overlay ---------- */
+var GITHUB="https://github.com/bpmorris22/Hayabusa-Wrapper";
+function openUrl(u){ try{ new ActiveXObject("WScript.Shell").Run('"'+u+'"',1,false); }catch(e){ setStatus("Could not open browser: "+e.message,"err"); } }
+function openHelp(){ try{ $("helpVer").innerHTML="v"+APP_VERSION; }catch(e){} showEl("helpModal",true); }
+function closeHelp(){ showEl("helpModal",false); }
+
 window.onload=init;
 </script>
+<div id="helpModal" class="modal hide" onclick="if((event.srcElement||{}).id==='helpModal')closeHelp()">
+  <div class="mcard">
+    <span class="x" onclick="closeHelp()" title="Close">&times;</span>
+    <h2>Hayabusa Wrapper <span class="muted" style="font-size:13px;font-weight:400" id="helpVer"></span></h2>
+    <div class="gh muted">GitHub: <span class="lnk" onclick="openUrl(GITHUB)">https://github.com/bpmorris22/Hayabusa-Wrapper</span></div>
+    <p>A single-file GUI for triaging <b>Windows event logs</b> with Yamato-Security Hayabusa — runs <code>csv-timeline</code> for you and turns the Sigma-detection CSV into an interactive, severity-aware triage view.</p>
+    <h3>Quick start</h3>
+    <ul>
+      <li>Put this <code>.hta</code> next to <code>hayabusa.exe</code> (with its <code>rules\</code> + <code>config\</code>), or use <b>Download Hayabusa</b>. Refresh detections with <b>Update rules</b>.</li>
+      <li>Point at <code>C:\Windows\System32\winevt\Logs</code> (run elevated), a collected <code>.evtx</code> tree, or a single <code>.evtx</code> — then <b>Process → analyze</b>.</li>
+      <li>Or <b>Load existing CSV…</b> to view a Hayabusa csv-timeline CSV you already have.</li>
+    </ul>
+    <h3>Views</h3>
+    <ul>
+      <li><b>Chronological</b> (default), <b>By severity</b> (collapsible groups), and <b>By rule title</b> (aggregated). IOC list, noise/known-FP list, and a detail pane are built in.</li>
+    </ul>
+    <h3>Command line</h3>
+    <p><code>mshta "Hayabusa-Wrapper.hta" "&lt;inputOrCsv&gt;" ["&lt;outDir&gt;"] [/auto]</code></p>
+    <ul>
+      <li><code>&lt;input&gt;</code> — a <code>.csv</code> (auto-loads) or an <code>.evtx</code> file / directory (prefilled; processed with <code>/auto</code>).</li>
+      <li><code>&lt;outDir&gt;</code> — CSV output directory (optional). &nbsp; <code>/auto</code> — process immediately.</li>
+    </ul>
+    <h3>Notes</h3>
+    <ul>
+      <li>Runs <code>--no-wizard --ISO-8601</code> (non-interactive, always-UTC <code>…Z</code>) and updates rules first by default. Validated against Hayabusa 3.10.0.</li>
+    </ul>
+    <p class="muted" style="font-size:11px">MIT © 2026 Ben Morris — click the link above for the full README &amp; releases.</p>
+  </div>
+</div>
+
 </body>
 </html>
