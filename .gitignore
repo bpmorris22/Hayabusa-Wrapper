@@ -8,3 +8,4 @@ Exported CSVs/
 *.evtx
 logs/
 mock-*.html
+defender-exclusion-added.txt

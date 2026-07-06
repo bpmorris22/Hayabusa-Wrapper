@@ -113,6 +113,15 @@
   .sep{display:inline-block;width:1px;height:18px;background:#30363d;margin:0 6px;vertical-align:middle}
   .tfilt{display:inline-block;background:#10263f;border:1px solid #1f6feb;border-radius:12px;padding:2px 10px;font-size:11px;margin-left:6px}
   .tfilt .x{cursor:pointer;color:#ff6b6b;margin-left:6px;font-weight:700}
+  .modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.66);z-index:1000;overflow:auto}
+  .modal .mcard{max-width:780px;margin:36px auto;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px 22px}
+  .modal h2{margin:0 0 6px;font-size:18px;font-weight:600}
+  .modal h3{margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e}
+  .modal ul{margin:4px 0;padding-left:20px}.modal li{margin:3px 0;font-size:13px}
+  .modal p{font-size:13px;margin:6px 0}
+  .modal code{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:2px 6px;font-family:Consolas,monospace;font-size:12px}
+  .modal .x{float:right;cursor:pointer;color:#8b949e;font-size:22px;line-height:1}.modal .x:hover{color:#e6edf3}
+  .modal .gh{font-family:Consolas,monospace;font-size:12px}
 </style>
 </head>
 <body>
@@ -121,6 +130,7 @@
   <span class="pill" id="verpill">version: checking&hellip;</span>
   <span class="pill" id="srcpill">no data loaded</span>
   <span style="float:right">
+    <button class="btn" id="helpBtn" onclick="openHelp()" title="Help, about &amp; GitHub link">Help</button>
     <button class="btn primary hide" id="selfUpd" onclick="doSelfUpdate()" title="A newer version is available on GitHub">Update</button>
     <button class="btn" id="fdown" title="Smaller text">A&minus;</button>
     <button class="btn" id="fup" title="Larger text">A+</button>
@@ -164,7 +174,7 @@
       <button class="btn" id="getBtn" title="Download &amp; install the latest Hayabusa next to this app (arch auto-detected: win-x64 / win-aarch64; rules + config included).">Download Hayabusa</button>
       <span class="sep"></span>
       <button class="btn primary" id="procBtn">Process &rarr; analyze</button>
-      <button class="btn" id="loadBtn">Load existing CSV&hellip;</button>
+      <button class="btn" id="loadBtn" title="Browse to a Hayabusa csv-timeline CSV produced earlier (e.g. in an Exported CSVs folder) and load it straight into the triage views — no need to re-process the raw .evtx.">Load processed CSV&hellip;</button>
       <input type="file" id="csvPick" style="display:none">
       <span class="sep"></span>
       <button class="btn" id="logToggle">Show log</button>
@@ -256,7 +266,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.1.2";
+var APP_VERSION = "0.2.0";
 var KNOWN_LATEST = "3.3.0";                                                        // baseline as of 2026-07-06
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -517,6 +527,8 @@ function evaluateTooling(promptIfNeeded){
   if(found){
     var miss=checkDeps();
     if(miss.length) setStatus("Hayabusa support folder(s) missing next to the exe: "+miss.join(", ")+" — click 'Update rules' to fetch the ruleset.","err");
+    // Sigma rules trip Defender — check for a path exclusion once the UI has settled (offer to add one)
+    window.setTimeout(function(){ checkDefenderExclusion(true); }, 900);
   }
   if(!promptIfNeeded) return;
   if(!found){
@@ -618,6 +630,105 @@ function updateRules(){
     else setStatus("Sigma rules updated.","ok"); };
   window.setTimeout(function(){ pollDone(ctx); }, 1000);
 }
+/* ---------- Defender exclusion check ----------
+   The Sigma ruleset legitimately contains attack-signature strings (encoded-command patterns, tool names,
+   webshell fragments). Defender can flag/quarantine rule files during `update-rules`, which both breaks the
+   ruleset and floods the console with alerts. On startup we check whether the Hayabusa folder is covered by
+   a Defender path exclusion and offer to add one (elevated Add-MpPreference → UAC prompt). */
+var DEFEXCL_DIR="";                  // last dir checked this session (re-checks if the exe moves)
+function psEsc(s){ return String(s).replace(/'/g,"''"); }
+function pathCovered(dirL, exclL){
+  dirL=dirL.replace(/[\\\/]+$/,""); exclL=exclL.replace(/[\\\/]+$/,"");
+  return dirL===exclL || dirL.indexOf(exclL+"\\")===0;
+}
+/* Non-elevated Get-MpPreference hides exclusions ("N/A: Must be an administrator to view exclusions" —
+   field-verified on this build). After a verified add we drop a marker file next to the exe so the app
+   doesn't re-prompt on every non-elevated launch. */
+function defExclMarker(){ return EXE_DIR+"\\defender-exclusion-added.txt"; }
+function checkDefenderExclusion(promptIfMissing, doneCb){
+  if(!EXE_DIR) return;
+  if(promptIfMissing && DEFEXCL_DIR===EXE_DIR) return;   // one auto-prompt per dir per session
+  DEFEXCL_DIR=EXE_DIR;
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var ps1=fso.GetSpecialFolder(2)+"\\hb_defexcl_"+uid()+".ps1";
+  var L=[
+    "try{",
+    "  $p=Get-MpPreference -ErrorAction Stop",
+    "  @($p.ExclusionPath) | ForEach-Object { if($_){ Write-Output ('EXCL:'+$_) } }",
+    "  Write-Output 'DEFENDER_OK'",
+    "}catch{ Write-Output ('NODEFENDER:'+$_.Exception.Message) }"
+  ];
+  try{ var f=fso.CreateTextFile(ps1,true); f.Write(L.join("\r\n")); f.Close(); }catch(e){ return; }
+  var ctx=runBatAsync(['powershell -NoProfile -ExecutionPolicy Bypass -File "'+ps1+'" > "__LOG__" 2>&1'], false);
+  ctx.onDone=function(log){
+    try{ fso.DeleteFile(ps1); }catch(e0){}
+    if(/NODEFENDER:/i.test(log)){ appendLog("Defender exclusion check skipped — Defender not queryable on this host (3rd-party AV / policy)."); if(doneCb) doneCb(false); return; }
+    if(log.indexOf("DEFENDER_OK")<0){ if(doneCb) doneCb(false); return; }   // ps failed some other way — stay quiet
+    var dirL=EXE_DIR.toLowerCase(), covered=false, cantRead=false;
+    var lines=(log+"").replace(/\r/g,"").split("\n");
+    for(var i=0;i<lines.length;i++){ var m=lines[i].match(/^EXCL:(.+)$/); if(!m) continue;
+      var ev=trimStr(m[1]);
+      if(/^N\/A:/i.test(ev)){ cantRead=true; continue; }              // running non-elevated — list is hidden
+      if(pathCovered(dirL, ev.toLowerCase())){ covered=true; break; } }
+    if(covered){ appendLog("Defender exclusion OK — "+EXE_DIR+" is covered."); if(doneCb) doneCb(true); return; }
+    if(cantRead){
+      if(fileExists(defExclMarker())){ appendLog("Defender exclusions can't be read non-elevated; marker file present — an exclusion for "+EXE_DIR+" was added from this app previously."); if(doneCb) doneCb(true); return; }
+      appendLog("Defender exclusions can't be read without admin — unable to verify whether "+EXE_DIR+" is excluded.");
+      if(doneCb) doneCb(false);
+      if(promptIfMissing && confirm("This app can't read Defender's exclusion list without admin rights, so it can't verify whether the Hayabusa folder is excluded:\n\n"+EXE_DIR
+        +"\n\nHayabusa's Sigma rules contain attack-signature text, and Defender can flag or quarantine rule files during 'Update rules' — breaking detections.\n\nAdd (or re-add — harmless if it already exists) a Defender path exclusion for this folder now?\n(An elevated PowerShell runs Add-MpPreference — approve the UAC prompt.)"))
+        addDefenderExclusion();
+      return;
+    }
+    appendLog("Defender has NO exclusion for "+EXE_DIR+" — rule files may be flagged during update-rules.");
+    if(doneCb) doneCb(false);
+    if(promptIfMissing && confirm("Windows Defender has no exclusion for the Hayabusa folder:\n\n"+EXE_DIR
+      +"\n\nHayabusa's Sigma rules contain attack-signature text, and Defender can flag or quarantine rule files during 'Update rules' — breaking detections.\n\nAdd a Defender path exclusion for this folder now?\n(An elevated PowerShell runs Add-MpPreference — approve the UAC prompt.)"))
+      addDefenderExclusion();
+  };
+  ctx.onTimeout=function(){ try{ fso.DeleteFile(ps1); }catch(e1){} };
+  window.setTimeout(function(){ pollDone(ctx); }, 1000);
+}
+function addDefenderExclusion(){
+  if(!EXE_DIR) return;
+  setStatus("Adding Defender exclusion (approve the UAC prompt)…","muted");
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var stamp=uid();
+  var inner=fso.GetSpecialFolder(2)+"\\hb_addexcl_"+stamp+".ps1";
+  var resFile=fso.GetSpecialFolder(2)+"\\hb_addexcl_"+stamp+".result";
+  // the ELEVATED script both adds and verifies (only elevation can read the list back), then writes a result file
+  var L=[
+    "$d='"+psEsc(EXE_DIR)+"'",
+    "$r='"+psEsc(resFile)+"'",
+    "try{",
+    "  Add-MpPreference -ExclusionPath $d -ErrorAction Stop",
+    "  $ex=@((Get-MpPreference).ExclusionPath)",
+    "  $dl=$d.TrimEnd('\\')",
+    "  $hit=$false; foreach($e in $ex){ if($e -and (($e.TrimEnd('\\') -ieq $dl))){ $hit=$true } }",
+    "  if($hit){ 'ADDED_OK' | Out-File -FilePath $r -Encoding ascii } else { 'ADD_UNVERIFIED' | Out-File -FilePath $r -Encoding ascii }",
+    "}catch{ ('ADD_FAIL:'+$_.Exception.Message) | Out-File -FilePath $r -Encoding ascii }"
+  ];
+  try{ var f=fso.CreateTextFile(inner,true); f.Write(L.join("\r\n")); f.Close(); }catch(e){ setStatus("Could not stage the exclusion script: "+e.message,"err"); return; }
+  try{
+    // elevate and WAIT, then read the result file the elevated script wrote
+    runBat(['powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList \'-NoProfile\',\'-ExecutionPolicy\',\'Bypass\',\'-File\',\'"'+inner.replace(/\\/g,"\\\\")+'"\'" > "__LOG__" 2>&1']);
+    try{ fso.DeleteFile(inner); }catch(e0){}
+    var res="";
+    try{ if(fso.FileExists(resFile)){ res=readUtf8(resFile); fso.DeleteFile(resFile); } }catch(e1){}
+    if(/ADDED_OK/.test(res)){
+      try{ writeUtf8(defExclMarker(), "Defender path exclusion added by Hayabusa-Wrapper v"+APP_VERSION+"\r\nPath: "+EXE_DIR+"\r\nVerified elevated via Get-MpPreference.\r\n"); }catch(e2){}
+      setStatus("Defender exclusion added and verified for "+EXE_DIR,"ok");
+      appendLog("Defender exclusion ADDED + verified: "+EXE_DIR);
+    } else if(/ADD_FAIL:/.test(res)){
+      setStatus("Defender refused the exclusion — see log.","err"); appendLog("--- Add-MpPreference ---\n"+res);
+    } else if(/ADD_UNVERIFIED/.test(res)){
+      setStatus("Exclusion command ran but could not be verified — check Windows Security > Exclusions.","err");
+    } else {
+      setStatus("UAC prompt declined or elevation failed — no exclusion added.","err");
+    }
+  }catch(e){ setStatus("Exclusion add failed: "+e.message,"err"); }
+}
+
 function canListFolder(p){
   try{ var fso=new ActiveXObject("Scripting.FileSystemObject");
     var e=new Enumerator(fso.GetFolder(p).Files); e.atEnd(); return true; }catch(err){ return false; }
@@ -1505,6 +1616,12 @@ function dayNum(s){ if(!s) return 0; var m=String(s).match(/(\d{4})-(\d{1,2})-(\
   function p(x){ x=String(x); return x.length<2?("0"+x):x; }
   return Number(m[1]+p(m[2])+p(m[3])); }
 
+/* ---------- help / about overlay ---------- */
+var GITHUB="https://github.com/bpmorris22/Hayabusa-Wrapper";
+function openUrl(u){ try{ new ActiveXObject("WScript.Shell").Run('"'+u+'"',1,false); }catch(e){ setStatus("Could not open browser: "+e.message,"err"); } }
+function openHelp(){ try{ $("helpVer").innerHTML="v"+APP_VERSION; }catch(e){} showEl("helpModal",true); }
+function closeHelp(){ showEl("helpModal",false); }
+
 /* ---------- self-update: quiet check of this app's GitHub Releases; one-click download of a newer .hta ---------- */
 var SELF_REPO="bpmorris22/Hayabusa-Wrapper", SELF_HTA="Hayabusa-Wrapper.hta", SELF_LATEST="", SELF_ASSET_URL="";
 function selfVerNewer(r,l){ var a=String(r).split("."),b=String(l).split("."),n=Math.max(a.length,b.length);
@@ -1555,5 +1672,36 @@ function doSelfUpdate(){
 }
 window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }catch(e){} };
 </script>
+<div id="helpModal" class="modal hide" onclick="if((event.srcElement||{}).id==='helpModal')closeHelp()">
+  <div class="mcard">
+    <span class="x" onclick="closeHelp()" title="Close">&times;</span>
+    <h2>Hayabusa Wrapper <span class="muted" style="font-size:13px;font-weight:400" id="helpVer"></span></h2>
+    <div class="gh muted">GitHub: <span class="lnk" onclick="openUrl(GITHUB)">https://github.com/bpmorris22/Hayabusa-Wrapper</span></div>
+    <p>A single-file GUI for triaging <b>Windows event logs</b> with Yamato-Security Hayabusa — runs <code>csv-timeline</code> for you and turns the Sigma-detection CSV into an interactive, severity-aware triage view.</p>
+    <h3>Quick start</h3>
+    <ul>
+      <li>Put this <code>.hta</code> next to <code>hayabusa.exe</code> (with its <code>rules\</code> + <code>config\</code>), or use <b>Download Hayabusa</b>. Refresh detections with <b>Update rules</b>.</li>
+      <li>Point at <code>C:\Windows\System32\winevt\Logs</code> (run elevated), a collected <code>.evtx</code> tree, or a single <code>.evtx</code> — then <b>Process → analyze</b>.</li>
+      <li>Or <b>Load processed CSV…</b> to open a previously produced timeline CSV directly — no need to re-process the raw <code>.evtx</code>.</li>
+    </ul>
+    <h3>Views</h3>
+    <ul>
+      <li><b>Chronological</b> (default), <b>By severity</b> (collapsible groups), and <b>By rule title</b> (aggregated). IOC list, noise/known-FP list, and a detail pane are built in.</li>
+    </ul>
+    <h3>Command line</h3>
+    <p><code>mshta "Hayabusa-Wrapper.hta" "&lt;inputOrCsv&gt;" ["&lt;outDir&gt;"] [/auto]</code></p>
+    <ul>
+      <li><code>&lt;input&gt;</code> — a <code>.csv</code> (auto-loads) or an <code>.evtx</code> file / directory (prefilled; processed with <code>/auto</code>).</li>
+      <li><code>&lt;outDir&gt;</code> — CSV output directory (optional). &nbsp; <code>/auto</code> — process immediately.</li>
+    </ul>
+    <h3>Notes</h3>
+    <ul>
+      <li>Runs <code>--no-wizard --ISO-8601</code> (non-interactive, always-UTC <code>…Z</code>) and updates rules first by default. Validated against Hayabusa 3.10.0.</li>
+      <li><b>Defender:</b> Sigma rule files contain attack-signature text and can be flagged during rule updates — on startup the app checks for a Defender path exclusion covering the Hayabusa folder and offers to add one (UAC prompt).</li>
+    </ul>
+    <p class="muted" style="font-size:11px">MIT © 2026 Ben Morris — click the link above for the full README &amp; releases.</p>
+  </div>
+</div>
+
 </body>
 </html>
