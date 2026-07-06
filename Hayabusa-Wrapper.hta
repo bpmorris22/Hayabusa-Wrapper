@@ -1,0 +1,1478 @@
+<!doctype html>
+<html>
+<head>
+<meta http-equiv="x-ua-compatible" content="IE=edge">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Hayabusa Wrapper</title>
+<HTA:APPLICATION
+  ID="hayabusaHta"
+  APPLICATIONNAME="Hayabusa Wrapper"
+  BORDER="thick"
+  CAPTION="yes"
+  SCROLL="auto"
+  SINGLEINSTANCE="no"
+  SHOWINTASKBAR="yes"
+  MAXIMIZEBUTTON="yes"
+  MINIMIZEBUTTON="yes"
+  INNERBORDER="no"
+  CONTEXTMENU="yes"
+  SELECTION="yes" />
+<!--
+  Hayabusa csv-timeline CSV contract, VERIFIED 2026-07-06 against Hayabusa 3.10.0 "standard" profile
+  (sample: Documents/PIC-NAV-APP - Hayabusa - 2.csv), timestamps via --ISO-8601 (always-UTC "…Z"):
+
+    Timestamp,RuleTitle,Level,Computer,Channel,EventID,RecordID,Details,ExtraFieldInfo,RuleID,EventTime
+      - Timestamp / EventTime : RFC-3339 UTC, sub-second, "…Z"
+      - Level                 : abbreviated  crit / high / med / low / info
+      - Channel               : abbreviated (Hayabusa config/channel_abbreviations.txt)
+      - Details / ExtraFieldInfo : sub-fields joined by " ¦ " (U+00A6 broken bar);  "-" = none
+      - RuleID                : Sigma rule UUID
+
+  Ingest is COLUMN-NAME driven: any profile works as long as Timestamp+RuleTitle+Level exist;
+  extra columns (verbose/super-verbose: MitreTactics, Provider, RuleAuthor, …) surface in the detail pane.
+  Non-timeline Hayabusa CSVs (logon-summary, metrics) fall back to the generic grid.
+
+  RUN GOTCHAS:
+   * --no-wizard is MANDATORY — without it csv-timeline blocks on the interactive rule wizard and the
+     async console never returns (pollDone would hang forever).
+   * We force --ISO-8601 (always UTC "…Z") so times are unambiguous (avoids the analysis-box-local-time class of error).
+     NB: in 3.x -R means --remove-duplicate-data (NOT RFC-3339) and there is no -V/-h (version = line 1 of `hayabusa help`).
+   * hayabusa.exe needs sibling rules/ and config/ folders. We run `update-rules` before processing by default.
+   * Native Rust exe — no .NET / DOTNET_ROLL_FORWARD needed. Binary is arch-specific (win-x64 vs win-aarch64).
+-->
+<style>
+  html{margin:0;height:100%;background:#0d1117}
+  body{margin:0;height:100%;background:#0d1117;color:#e6edf3;font-family:Segoe UI,Tahoma,sans-serif;font-size:16px}
+  #content{zoom:0.9}
+  a{color:#58a6ff}
+  .mono{font-family:Consolas,"Courier New",monospace}
+  .muted{color:#8b949e}
+  .err{color:#f85149}
+  .ok{color:#3fb950}
+  header{padding:8px 14px;background:#161b22;border-bottom:1px solid #30363d}
+  header h1{display:inline-block;font-size:15px;margin:0;font-weight:600;vertical-align:middle}
+  header h1 small{color:#8b949e;font-weight:400}
+  .pill{display:inline-block;font-size:11px;color:#8b949e;border:1px solid #30363d;border-radius:20px;padding:2px 10px;margin-left:8px;vertical-align:middle}
+  .wrap{padding:12px 14px}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin-bottom:12px}
+  .card h3{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e}
+  label.fld{display:block;margin:6px 0 2px;font-size:11px;color:#8b949e}
+  input.txt,select,textarea{background:#1c2330;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:5px 8px;font-size:13px;font-family:Consolas,monospace}
+  input.wide{width:62%}
+  .btn{background:#1c2330;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer;margin:2px}
+  .btn:hover{border-color:#58a6ff}
+  .btn.primary{background:#1f6feb;border-color:#1f6feb}
+  .btn.on{background:#1f6feb;border-color:#1f6feb;color:#fff}
+  .row{white-space:nowrap}
+  .stat{display:inline-block;background:#1c2330;border:1px solid #30363d;border-radius:8px;padding:6px 12px;margin:0 6px 6px 0;min-width:70px;vertical-align:top}
+  .stat .n{font-size:17px;font-weight:700;display:block}
+  .stat .l{font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+  .stat.crit{border-color:#8b3a3a}.stat.crit .n{color:#ff6b6b}
+  .stat.high{border-color:#8a5a2a}.stat.high .n{color:#f0883e}
+  .stat.med{border-color:#8a7a2a}.stat.med .n{color:#e3b341}
+  .stat.low{border-color:#2a5a8a}.stat.low .n{color:#58a6ff}
+  .stat.info .n{color:#8b949e}
+  .cards3{width:100%}
+  .col3{display:inline-block;width:32%;vertical-align:top;margin-right:1%}
+  .brow{white-space:nowrap;margin:3px 0}
+  .blab{display:inline-block;width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;font-family:Consolas,monospace;font-size:11px}
+  .blab.lnk{cursor:pointer;color:#58a6ff}
+  .blab.lnk:hover{text-decoration:underline}
+  .btrack{display:inline-block;width:32%;height:12px;background:#1c2330;border-radius:3px;overflow:hidden;vertical-align:middle}
+  .bfill{display:block;height:100%;background:#1f6feb}
+  .bval{display:inline-block;width:18%;text-align:right;font-size:11px;color:#8b949e;vertical-align:middle}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{text-align:left;padding:4px 7px;border-bottom:1px solid #30363d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  th{background:#1c2330;cursor:pointer;color:#c9d1d9;position:relative;z-index:3;box-shadow:0 1px 0 #30363d}
+  th:hover{color:#58a6ff}
+  td{max-width:420px}
+  tr.row-crit td{background:#2a1416}
+  tr.row-high td{background:#241c12}
+  tr.ioc td.first{border-left:3px solid #ff6b6b}
+  tr.sel td{background:#1c2f4a}
+  tr.grp td{background:#12233a;font-weight:600;color:#e6edf3;cursor:pointer;border-top:2px solid #30363d}
+  .scroll{max-height:58vh;overflow:auto;border:1px solid #30363d;border-radius:8px}
+  .chip{display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;font-weight:700;letter-spacing:.3px}
+  .lv-crit{background:#3a1416;color:#ff6b6b}
+  .lv-high{background:#3a2a10;color:#f0883e}
+  .lv-med{background:#3a3410;color:#e3b341}
+  .lv-low{background:#10263f;color:#58a6ff}
+  .lv-info{background:#21262d;color:#8b949e}
+  .tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600;margin-right:3px}
+  .tag.ioc{background:#3a1416;color:#ff6b6b;border:1px solid #ff6b6b}
+  .tag.noise{background:#21262d;color:#8b949e;border:1px dashed #6e7681}
+  .dl{font-family:Consolas,"Courier New",monospace;font-size:11px;max-height:220px;overflow:auto;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:6px;margin:4px 0;white-space:normal;word-break:break-word}
+  .dl div{margin:1px 0}
+  .kv{color:#8b949e}
+  .hl-user{color:#d29922}
+  .hl-ioc{color:#ff6b6b;font-weight:700}
+  #log{white-space:pre-wrap;font-family:Consolas,monospace;font-size:11px;color:#8b949e;max-height:140px;overflow:auto;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;display:none;margin-top:8px}
+  .hide{display:none}
+  .lnk{cursor:pointer;color:#58a6ff}
+  .lnk:hover{text-decoration:underline}
+  .sep{display:inline-block;width:1px;height:18px;background:#30363d;margin:0 6px;vertical-align:middle}
+  .tfilt{display:inline-block;background:#10263f;border:1px solid #1f6feb;border-radius:12px;padding:2px 10px;font-size:11px;margin-left:6px}
+  .tfilt .x{cursor:pointer;color:#ff6b6b;margin-left:6px;font-weight:700}
+</style>
+</head>
+<body>
+<header>
+  <h1>Hayabusa Wrapper <small>&mdash; Windows event-log Sigma triage <span id="appver"></span></small></h1>
+  <span class="pill" id="verpill">version: checking&hellip;</span>
+  <span class="pill" id="srcpill">no data loaded</span>
+  <span style="float:right">
+    <button class="btn" id="fdown" title="Smaller text">A&minus;</button>
+    <button class="btn" id="fup" title="Larger text">A+</button>
+  </span>
+</header>
+
+<div class="wrap" id="content">
+
+  <!-- CONTROL PANEL -->
+  <div class="card">
+    <h3>Hayabusa control panel</h3>
+    <div class="muted" id="exeline" style="font-size:11px;margin-bottom:6px"></div>
+    <label class="fld">Event logs to process
+      &mdash; <select id="inMode" title="Directory = recurse a folder of .evtx (hayabusa -d). File = one .evtx (hayabusa -f). KAPE / Velociraptor collection trees work as-is.">
+        <option value="d">directory (recursive)</option><option value="f">single .evtx file</option></select>
+      &nbsp;<label style="font-size:12px" title="Update the Sigma detection rules (hayabusa update-rules) immediately before running the timeline. Strongly recommended. Non-fatal if offline — the run then uses the rules already on disk.">
+        <input type="checkbox" id="optUpd" checked> update rules first</label>
+      &nbsp;<span class="muted" style="font-size:11px" title="Timestamps are always emitted as UTC ISO-8601 (…Z) via --ISO-8601 so times are unambiguous and parse consistently.">times: UTC ISO-8601</span>
+      &nbsp;<label style="font-size:12px" title="-q: quiet console (suppress the banner).">
+        <input type="checkbox" id="optQuiet"> quiet</label>
+      &nbsp;<label class="muted" style="font-size:12px">min level
+        <select id="optMin" title="Minimum severity to include. Default 'informational' = SEE EVERYTHING (no -m flag).">
+          <option value="informational" selected>informational (all)</option>
+          <option value="low">low</option><option value="medium">medium</option>
+          <option value="high">high</option><option value="critical">critical</option></select></label>
+      &nbsp;<label class="muted" style="font-size:12px">profile
+        <select id="optProfile" title="Hayabusa output profile (columns). 'standard' matches this tool's rich view; others still load (extra columns show in the detail pane).">
+          <option value="standard" selected>standard</option><option value="minimal">minimal</option>
+          <option value="verbose">verbose</option><option value="super-verbose">super-verbose</option></select></label>
+    </label>
+    <input class="txt wide" id="inPath" value="">
+    <input type="file" id="inPick" style="display:none">
+    <button class="btn" id="browseBtn">Browse&hellip;</button>
+    <button class="btn" id="liveBtn" title="Point at this machine's live event logs (C:\Windows\System32\winevt\Logs). Reading them needs an ELEVATED run.">Scan this machine</button>
+    <label class="fld">CSV output directory</label>
+    <input class="txt wide" id="outDir" value="">
+    <button class="btn" id="openDirBtn">Open folder</button>
+    <div style="margin-top:10px">
+      <button class="btn" id="verBtn">Check version</button>
+      <button class="btn" id="updBtn" title="Update the Sigma ruleset now (hayabusa update-rules).">Update rules</button>
+      <button class="btn" id="getBtn" title="Download &amp; install the latest Hayabusa next to this app (arch auto-detected: win-x64 / win-aarch64; rules + config included).">Download Hayabusa</button>
+      <span class="sep"></span>
+      <button class="btn primary" id="procBtn">Process &rarr; analyze</button>
+      <button class="btn" id="loadBtn">Load existing CSV&hellip;</button>
+      <input type="file" id="csvPick" style="display:none">
+      <span class="sep"></span>
+      <button class="btn" id="logToggle">Show log</button>
+      <span class="muted" id="status" style="margin-left:8px"></span>
+    </div>
+    <div style="margin-top:8px" id="producedRow" class="hide">
+      <label class="fld">Produced CSVs &mdash; pick one to view</label>
+      <select id="producedSel" style="min-width:70%"></select>
+      <button class="btn" id="loadSelBtn">Load selected</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <!-- RESULTS -->
+  <div id="results" class="hide">
+    <div class="card">
+      <h3 id="ovTitle">Overview</h3>
+      <div id="statbar"></div>
+    </div>
+
+    <div class="card cards3 hide" id="hbCards">
+      <div class="col3"><h3>Top rules (by detections)</h3><div id="topRules"></div></div>
+      <div class="col3"><h3>Top computers (by detections)</h3><div id="topComps"></div></div>
+      <div class="col3"><h3>Critical / High &mdash; most recent</h3><div id="topSev"></div></div>
+    </div>
+
+    <div class="card">
+      <h3 id="tableTitle">Detections</h3>
+      <div class="row hide" style="margin-bottom:8px" id="viewToggle">
+        <button class="btn on" id="vChrono" title="Flat chronological — every detection, one row, newest first">Chronological</button>
+        <button class="btn" id="vSev" title="Grouped by severity: Critical → High → Medium → Low → Informational">By severity</button>
+        <button class="btn" id="vTitle" title="Aggregated by rule title: one row per rule with count, hosts, first/last seen">By rule title</button>
+      </div>
+      <div class="row hide" style="margin-bottom:8px" id="lvlCats">
+        <button class="btn on" data-lvl="all">All</button>
+        <button class="btn" data-lvl="crit">Critical</button>
+        <button class="btn" data-lvl="high">High</button>
+        <button class="btn" data-lvl="med">Medium</button>
+        <button class="btn" data-lvl="low">Low</button>
+        <button class="btn" data-lvl="info">Info</button>
+        <button class="btn" data-lvl="ioc">IOC hits</button>
+      </div>
+      <div class="row" style="margin-bottom:8px">
+        <input class="txt" id="q" placeholder="search all columns (title, details, computer, channel, rule id&hellip;)" style="width:300px">
+        <span id="compWrap" class="hide"><span class="sep"></span><label class="muted" style="font-size:12px">computer:</label>
+          <select id="compSel" title="Filter by source computer."><option value="">all computers</option></select></span>
+        <span class="sep"></span>
+        <input class="txt mono" id="dfrom" placeholder="from YYYY-MM-DD" style="width:140px" title="Filter by Timestamp (UTC)">
+        <span class="muted">&rarr;</span>
+        <input class="txt mono" id="dto" placeholder="to YYYY-MM-DD" style="width:140px" title="Filter by Timestamp (UTC)">
+        <span class="sep"></span>
+        <button class="btn" id="iocBtn">IOC / keywords&hellip;</button>
+        <button class="btn" id="noiseBtn">Noise list&hellip;</button>
+        <button class="btn" id="clearBtn">clear</button>
+        <button class="btn" id="exportBtn">Export view &rarr; CSV</button>
+        <button class="btn" id="copyBtn">Copy for case notes</button>
+        <span id="tfiltWrap"></span>
+        <span class="muted" id="count" style="margin-left:8px"></span>
+      </div>
+      <div id="iocWrap" class="hide" style="margin-bottom:8px">
+        <label class="fld">IOC / keyword list — comma or newline separated; matched (case-insensitive substring) against rule title, details, extra fields, computer, channel and rule id. Matches score +3 and light up red.</label>
+        <textarea id="iocBox" rows="3" style="width:70%;vertical-align:top"></textarea>
+        <button class="btn" id="iocApply">Apply</button>
+        <button class="btn" id="iocLoad">Load file&hellip;</button>
+        <input type="file" id="iocPick" style="display:none">
+        <span class="muted" id="iocInfo" style="font-size:11px"></span>
+      </div>
+      <div id="noiseWrap" class="hide" style="margin-bottom:8px">
+        <label class="fld">Noise / known-FP list — comma or newline separated; detections whose rule title / details / rule id contain a term are HIDDEN when suppression is on. Use for environment-specific false positives (keep them here, not baked into the tool).</label>
+        <textarea id="noiseBox" rows="3" style="width:70%;vertical-align:top"></textarea>
+        <button class="btn" id="noiseApply">Apply</button>
+        <button class="btn" id="noiseLoad">Load file&hellip;</button>
+        <input type="file" id="noisePick" style="display:none">
+        <label style="font-size:12px;margin-left:8px"><input type="checkbox" id="noiseShow"> show suppressed</label>
+        <span class="muted" id="noiseInfo" style="font-size:11px"></span>
+      </div>
+      <div class="scroll" id="tblScroll"><table id="tbl"></table></div>
+      <div class="muted" id="hbFoot" style="font-size:11px;margin-top:6px">All timestamps are UTC (ISO-8601, …Z). Row tint = severity; red left-border = IOC hit. Click a detection for full detail (all fields split out). In "By severity" click a group header to collapse it; in "By rule title" click a rule to drill in. Max <span id="maxrowLbl"></span> rows shown; export writes the full filtered set.</div>
+    </div>
+
+    <div class="card hide" id="detailCard">
+      <h3>Detail <span class="lnk" id="detCopy" style="float:right;margin-left:12px">copy</span><span class="lnk" id="detClose" style="float:right">close &times;</span></h3>
+      <div id="detBody"></div>
+    </div>
+  </div>
+
+</div>
+
+<script language="JScript">
+"use strict";
+
+var APP_VERSION = "0.1.0";
+var KNOWN_LATEST = "3.3.0";                                                        // baseline as of 2026-07-06
+var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
+var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
+var LIVE_LOGS = "C:\\Windows\\System32\\winevt\\Logs";
+var EXE = "";
+var EXE_DIR = "";
+var LOCAL_VER = "";
+var LATEST_VER = "";
+var WEB_OK = false;
+var QUERY = "";
+var MAXROWS = 5000;
+var LASTOUTDIR = "";
+var qTimer = null;
+var MODE = "hb";                     // "hb" = rich Hayabusa view, "generic" = raw table
+var VIEW = "chrono";                 // "chrono" | "sev" | "title"
+var ROWS = [];                       // detection records
+var CURLVL = "all";                  // level filter: all|crit|high|med|low|info|ioc
+var CURCOMP = "";                    // computer filter
+var TITLEONLY = "";                  // exact-rule-title drill-down filter
+var DFROM = 0, DTO = 0;
+var SORTKEY = 0, SORTDIR = -1;       // chrono: default Timestamp desc
+var TSORTKEY = -1, TSORTDIR = -1;    // title view sort (-1 = default rank/count)
+var IOCS = [];
+var NOISE = [];
+var SHOWNOISE = false;
+var DETREC = null;
+var GHEAD = null, GROWS = [], GSRC = "";
+var GSORTKEY = -1, GSORTDIR = 1;
+var GSRCIDX = -1, SRCFILTER = "";
+var BUSY = false;
+var PRODUCED = [];
+var GOPEN = {crit:1,high:1,med:1,low:0,info:0};   // severity-group collapse state
+
+/* ---------- level metadata ---------- */
+var LVLKEYS = ["crit","high","med","low","info"];
+var LVLMETA = {
+  crit:{name:"Critical",rank:4,cls:"lv-crit"},
+  high:{name:"High",rank:3,cls:"lv-high"},
+  med:{name:"Medium",rank:2,cls:"lv-med"},
+  low:{name:"Low",rank:1,cls:"lv-low"},
+  info:{name:"Informational",rank:0,cls:"lv-info"}
+};
+function levelKey(raw){
+  var s=trimStr(String(raw||"")).toLowerCase();
+  if(s.indexOf("crit")===0) return "crit";
+  if(s.indexOf("high")===0) return "high";
+  if(s.indexOf("med")===0) return "med";
+  if(s.indexOf("low")===0) return "low";
+  if(s.indexOf("info")===0) return "info";
+  return "info";
+}
+
+/* ---------- tiny helpers ---------- */
+function $(id){ return document.getElementById(id); }
+function esc(s){ if(s==null) return ""; s=String(s);
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function contains(s,sub){ return String(s).indexOf(sub)>=0; }
+function nf(n){ n=String(n); var dot=n.indexOf("."); var dec=""; if(dot>=0){ dec=n.substring(dot); n=n.substring(0,dot); }
+  var r="",c=0; for(var k=n.length-1;k>=0;k--){ r=n.charAt(k)+r; c++; if(c%3===0&&k>0) r=","+r; } return r+dec; }
+function setStatus(msg,cls){ var el=$("status"); el.innerHTML=esc(msg); el.className=cls||"muted"; }
+function appendLog(t){ var el=$("log"); if(el.getAttribute("data-ph")==="1"){ el.innerHTML=""; el.setAttribute("data-ph","0"); }
+  el.style.display="block"; $("logToggle").innerHTML="Hide log"; el.innerHTML+=esc(t)+"\n"; el.scrollTop=el.scrollHeight; }
+function trimStr(s){ return String(s).replace(/^\s+|\s+$/g,""); }
+function baseName(p){ if(!p) return ""; p=String(p); var i=Math.max(p.lastIndexOf("\\"),p.lastIndexOf("/")); return i>=0?p.substring(i+1):p; }
+function showEl(id,vis){ var e=$(id); if(!e) return; var c=e.className.replace(/\s*\bhide\b/g,"");
+  e.className = vis ? c : (c+" hide"); }
+function msOf(s){ if(!s) return 0; var m=String(s).match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if(!m) return 0; return Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]); }
+function dayOf(s){ if(!s) return 0; var m=String(s).match(/(\d{4})-(\d{2})-(\d{2})/); if(!m) return 0; return Number(m[1]+m[2]+m[3]); }
+function trunc(s,n){ s=String(s); return s.length>n?(s.substring(0,n)+"…"):s; }
+
+/* Details / ExtraFieldInfo are joined by " ¦ " (U+00A6). Under the FSO ANSI fallback the UTF-8 bytes
+   0xC2 0xA6 read back as Â¦ — match both forms so splitting works either way. */
+function splitSubs(raw){
+  if(raw==null) return [];
+  var s=trimStr(String(raw));
+  if(s==="" || s==="-") return [];
+  var parts=s.split(/\s*Â?¦\s*/);
+  var out=[]; for(var i=0;i<parts.length;i++){ var p=trimStr(parts[i]); if(p!=="") out.push(p); }
+  return out;
+}
+
+/* ---------- file IO via ActiveX (UTF-8 safe, with network-zone fallback) ----------
+   ADODB.Stream is the proper UTF-8 reader; from a NETWORK location mshta's zone policy blocks it, so we
+   fall back to ANSI FSO IO. CSV structure survives (ASCII); the ¦ separator + non-ASCII mojibake, which
+   splitSubs() defends against. Best fidelity = run from a LOCAL path. */
+var FILE_IO="adodb";
+function zoneNote(){
+  appendLog("NOTE: running from a network location — Windows zone policy blocks the UTF-8 file reader (ADODB.Stream). Falling back to ANSI file IO. Everything works, but the ¦ detail separator / accented text may look odd; splitting is handled defensively. For full fidelity copy this folder to a LOCAL path (e.g. C:\\Tools\\Hayabusa) and run from there.");
+}
+function readUtf8(path){
+  if(FILE_IO==="adodb"){
+    try{
+      var st=new ActiveXObject("ADODB.Stream");
+      st.Type=2; st.Charset="utf-8"; st.Open(); st.LoadFromFile(path);
+      var parts=[]; while(!st.EOS){ parts.push(st.ReadText(65536)); } st.Close();
+      return parts.join("");
+    }catch(e){
+      if(!/safety settings|data source/i.test(e.message||"")) throw e;
+      FILE_IO="fso"; zoneNote();
+    }
+  }
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var f=fso.OpenTextFile(path,1,false,0), out=f.ReadAll(); f.Close();
+  if(out.length>=3 && out.charCodeAt(0)===239 && out.charCodeAt(1)===187 && out.charCodeAt(2)===191) out=out.substring(3);
+  return out;
+}
+function writeUtf8(path,text){
+  if(FILE_IO==="adodb"){
+    try{
+      var st=new ActiveXObject("ADODB.Stream");
+      st.Type=2; st.Charset="utf-8"; st.Open(); st.WriteText(text); st.SaveToFile(path,2); st.Close();
+      return;
+    }catch(e){
+      if(!/safety settings|data source/i.test(e.message||"")) throw e;
+      FILE_IO="fso"; zoneNote();
+    }
+  }
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var f=fso.CreateTextFile(path,true,false); f.Write(text); f.Close();
+}
+function uid(){ return new Date().getTime()+""+Math.floor(Math.random()*100000); }
+/* cmd expands %N / %VAR% inside .bat lines even within quotes — Velociraptor trees contain literal % (C%3A) */
+function batEsc(s){ return String(s).replace(/%/g,"%%"); }
+
+/* Run a batch script, wait, return {rc, log}. show=true → visible console. */
+function runBat(lines, show){
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var sh=new ActiveXObject("WScript.Shell");
+  var tmp=fso.GetSpecialFolder(2)+"";
+  var stamp=uid();
+  var bat=tmp+"\\hb_"+stamp+".bat";
+  var logp=tmp+"\\hb_"+stamp+".log";
+  var f=fso.CreateTextFile(bat,true);
+  f.WriteLine("@echo off");
+  for(var i=0;i<lines.length;i++){ f.WriteLine(lines[i].replace(/__LOG__/g,logp)); }
+  f.Close();
+  var rc=sh.Run('cmd /c ""'+bat+'""', show?1:0, true);
+  var txt="";
+  try{ if(fso.FileExists(logp)) txt=readUtf8(logp); }catch(e){ txt="(could not read log: "+e.message+")"; }
+  try{ fso.DeleteFile(bat); }catch(e2){}
+  try{ if(fso.FileExists(logp)) fso.DeleteFile(logp); }catch(e3){}
+  return { rc:rc, log:txt };
+}
+
+/* Run a batch NON-blocking; writes a .done marker when finished. Keeps the HTA responsive. */
+function runBatAsync(lines, show){
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var sh=new ActiveXObject("WScript.Shell");
+  var tmp=fso.GetSpecialFolder(2)+"";
+  var stamp=uid();
+  var bat=tmp+"\\hb_"+stamp+".bat";
+  var logp=tmp+"\\hb_"+stamp+".log";
+  var donep=tmp+"\\hb_"+stamp+".done";
+  var f=fso.CreateTextFile(bat,true);
+  f.WriteLine("@echo off");
+  for(var i=0;i<lines.length;i++){ f.WriteLine(lines[i].replace(/__LOG__/g,logp)); }
+  f.WriteLine('echo done> "'+donep+'"');
+  f.Close();
+  sh.Run('cmd /c ""'+bat+'""', show?1:0, false);
+  return { bat:bat, log:logp, done:donep, elapsed:0 };
+}
+function pollDone(ctx){
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  if(fso.FileExists(ctx.done)){
+    var log=""; try{ if(fso.FileExists(ctx.log)) log=readUtf8(ctx.log); }catch(e){ log="(could not read log: "+e.message+")"; }
+    try{ fso.DeleteFile(ctx.bat); }catch(e1){}
+    try{ fso.DeleteFile(ctx.done); }catch(e2){}
+    try{ if(fso.FileExists(ctx.log)) fso.DeleteFile(ctx.log); }catch(e3){}
+    ctx.onDone(log);
+    return;
+  }
+  ctx.elapsed+=1;
+  if(ctx.elapsed>3600){ ctx.onTimeout&&ctx.onTimeout(); return; }   // 60-min safety cap (big DC trees are slow)
+  if(ctx.onTick) ctx.onTick(ctx.elapsed);
+  window.setTimeout(function(){ pollDone(ctx); }, 1000);
+}
+
+/* ---------- computer filter ---------- */
+function distinctVals(arr){ var seen={}, out=[]; for(var i=0;i<arr.length;i++){ var v=arr[i]; if(v!=null && v!=="" && !seen[v]){ seen[v]=1; out.push(v); } } return out; }
+function populateComputerFilter(vals){
+  var sel=$("compSel"); sel.innerHTML="";
+  var o0=document.createElement("option"); o0.value=""; o0.text="all computers ("+vals.length+")"; sel.add(o0);
+  vals=vals.slice(0).sort();
+  for(var i=0;i<vals.length;i++){ var o=document.createElement("option"); o.value=vals[i]; o.text=vals[i]; sel.add(o); }
+  CURCOMP=""; sel.value="";
+  showEl("compWrap", vals.length>1);
+}
+
+/* ---------- tooling: locate / version / rules ---------- */
+function fileExists(p){ try{ return new ActiveXObject("Scripting.FileSystemObject").FileExists(p); }catch(e){ return false; } }
+function fileSize(p){ try{ return new ActiveXObject("Scripting.FileSystemObject").GetFile(p).Size; }catch(e){ return -1; } }
+function folderExists(p){ try{ return new ActiveXObject("Scripting.FileSystemObject").FolderExists(p); }catch(e){ return false; } }
+function folderNonEmpty(p){ try{ var fso=new ActiveXObject("Scripting.FileSystemObject");
+  if(!fso.FolderExists(p)) return false; var fo=fso.GetFolder(p);
+  return (new Enumerator(fo.SubFolders).atEnd()===false) || (new Enumerator(fo.Files).atEnd()===false); }catch(e){ return false; } }
+function parentDir(p){ var i=String(p).lastIndexOf("\\"); return i>=0?p.substring(0,i):p; }
+function htaFolder(){
+  try{ var cl=hayabusaHta.commandLine+""; var m=cl.match(/"([^"]+\.hta)"/i); if(!m) m=cl.match(/([A-Za-z]:\\[^"]+\.hta)/i);
+    if(m) return parentDir(m[1]); }catch(e){}
+  try{ var p=decodeURIComponent(location.pathname+"").replace(/^\//,"").replace(/\//g,"\\"); return parentDir(p); }catch(e2){}
+  return "";
+}
+function resolveExe(){
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var dir=htaFolder(), cands=[];
+  if(dir){ cands.push(dir+"\\hayabusa.exe"); cands.push(dir+"\\hayabusa\\hayabusa.exe"); }
+  cands.push("C:\\Tools\\hayabusa\\hayabusa.exe");
+  cands.push("C:\\ZimmermanTools\\hayabusa\\hayabusa.exe");
+  for(var i=0;i<cands.length;i++){ if(fso.FileExists(cands[i])){ EXE=cands[i]; EXE_DIR=parentDir(cands[i]); return true; } }
+  EXE=""; EXE_DIR=dir||""; return false;
+}
+function checkDeps(){
+  var miss=[];
+  if(!EXE_DIR) return ["(install folder unknown)"];
+  if(!folderNonEmpty(EXE_DIR+"\\rules")) miss.push("rules\\");
+  if(!folderExists(EXE_DIR+"\\config")) miss.push("config\\");
+  return miss;
+}
+function verTuple(v){ var p=String(v).split("."); var a=[]; for(var i=0;i<p.length;i++) a.push(parseInt(p[i],10)||0); return a; }
+function verCmp(a,b){ a=verTuple(a); b=verTuple(b); var n=Math.max(a.length,b.length);
+  for(var i=0;i<n;i++){ var x=a[i]||0,y=b[i]||0; if(x!==y) return x<y?-1:1; } return 0; }
+function fetchLatest(){
+  LATEST_VER=KNOWN_LATEST; WEB_OK=false;
+  try{
+    var x=new ActiveXObject("MSXML2.ServerXMLHTTP.6.0");
+    x.setTimeouts(2000,3000,4000,4000);
+    x.open("GET", HB_API_LATEST, false);
+    x.setRequestHeader("User-Agent","Hayabusa-Wrapper");
+    x.send();
+    if(x.status===200){ WEB_OK=true; var t=x.responseText+""; var m=t.match(/"tag_name"\s*:\s*"v?([0-9.]+)"/i); if(m) LATEST_VER=m[1]; }
+  }catch(e){ WEB_OK=false; }
+  return LATEST_VER;
+}
+function updateVerPill(){
+  var s=LOCAL_VER?("Hayabusa v"+esc(LOCAL_VER)):"Hayabusa: not found";
+  if(!WEB_OK){ s+=" &middot; <span style='color:#8b949e'>no internet / no web source</span>"; }
+  else if(LATEST_VER){
+    if(LOCAL_VER && verCmp(LOCAL_VER,LATEST_VER)<0) s+=" &middot; <span style='color:#d29922'>v"+esc(LATEST_VER)+" available</span>";
+    else if(LOCAL_VER) s+=" &middot; <span style='color:#3fb950'>latest</span>";
+    else s+=" &middot; latest v"+esc(LATEST_VER);
+  }
+  $("verpill").innerHTML=s;
+}
+function evaluateTooling(promptIfNeeded){
+  var dir=htaFolder();
+  var found=resolveExe();
+  if(EXE) $("exeline").innerHTML="Tool: "+esc(EXE);
+  else $("exeline").innerHTML='<span class="err">hayabusa.exe not found next to this app ('+esc(dir||"app folder")+'), in a hayabusa\\ subfolder, or C:\\Tools\\hayabusa</span>';
+  if(found) checkVersion(); else LOCAL_VER="";
+  fetchLatest(); updateVerPill();
+  if(found){
+    var miss=checkDeps();
+    if(miss.length) setStatus("Hayabusa support folder(s) missing next to the exe: "+miss.join(", ")+" — click 'Update rules' to fetch the ruleset.","err");
+  }
+  if(!promptIfNeeded) return;
+  if(!found){
+    if(confirm("hayabusa.exe was not found.\n\nDownload and install the latest Hayabusa next to this app now?\n(Architecture auto-detected; hayabusa.exe + rules\\ + config\\ installed for you.)")) downloadHayabusa();
+  } else {
+    var miss2=checkDeps();
+    if(miss2.length && confirm("Hayabusa is present but its "+miss2.join(" and ")+" folder(s) are missing/empty.\n\nRun 'update-rules' now to fetch the Sigma ruleset?")) updateRules();
+  }
+}
+function openReleases(){ try{ new ActiveXObject("WScript.Shell").Run('"'+HB_RELEASES_PAGE+'"',1,false); }catch(e){ setStatus("Could not open browser: "+e.message,"err"); } }
+/* Download + install Hayabusa next to the .hta, auto-picking the arch asset (win-x64 / win-aarch64).
+   The zip ships hayabusa-<ver>-win-<arch>.exe + rules/ + config/ — we copy it all and add a hayabusa.exe alias.
+   PS is written to a temp .ps1 (run via -File) so quoting/interpolation is unrestricted. */
+function downloadHayabusa(){
+  var target=htaFolder()||EXE_DIR;
+  if(!target){ setStatus("Cannot determine the app folder to install into","err"); return; }
+  if(BUSY){ setStatus("A run is in progress — wait for it to finish.","err"); return; }
+  var verForUrl=(WEB_OK&&LATEST_VER)?LATEST_VER:KNOWN_LATEST;
+  if(!confirm("Download the latest Hayabusa and install it next to this app?\n\nInstall folder:\n"+target+"\n\nArchitecture is auto-detected (x64 / aarch64). The rules and config folders are included; refresh them afterwards with 'Update rules'.\n\nProceed?")) return;
+  setStatus("Downloading & installing Hayabusa… a console window shows progress (this can take a minute).","muted");
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var tmp=fso.GetSpecialFolder(2)+"";
+  var ps1=tmp+"\\hayabusa_install_"+uid()+".ps1";
+  var tq=String(target).replace(/'/g,"''");
+  var L=[];
+  L.push("$ErrorActionPreference='Stop'");
+  L.push("[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12");
+  L.push("$target='"+tq+"'");
+  L.push("$fallbackVer='"+verForUrl+"'");
+  L.push("$hdr=@{ 'User-Agent'='Hayabusa-Wrapper' }");
+  // PROCESSOR_ARCHITEW6432 holds the TRUE arch when running under 32-bit WOW64 (mshta is 32-bit → ARCHITECTURE lies as x86)
+  L.push("$arch=$env:PROCESSOR_ARCHITEW6432; if(-not $arch){ $arch=$env:PROCESSOR_ARCHITECTURE }");
+  L.push("if($arch -eq 'ARM64'){$a='aarch64'} else {$a='x64'}");   // never x86 on a 64-bit OS
+  L.push("Write-Output ('Detected arch: '+$arch+' -> win-'+$a)");
+  L.push("$asset=$null; $ver=$fallbackVer");
+  L.push("try{");
+  L.push("  $rel=Invoke-RestMethod -Uri 'https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest' -Headers $hdr");
+  L.push("  $ver=$rel.tag_name -replace '^v',''");
+  L.push("  $asset=$rel.assets | Where-Object { $_.name -match ('win-'+$a+'\\.zip$') } | Select-Object -First 1");
+  L.push("  if(-not $asset){ $asset=$rel.assets | Where-Object { ($_.name -like ('*win-'+$a+'*.zip')) -and ($_.name -notlike '*live-response*') } | Select-Object -First 1 }");
+  L.push("}catch{ Write-Output ('API lookup failed, using fallback URL: '+$_.Exception.Message) }");
+  L.push("if($asset){ $u=$asset.browser_download_url; $an=$asset.name }");
+  L.push("else { $an=('hayabusa-'+$ver+'-win-'+$a+'.zip'); $u=('https://github.com/Yamato-Security/hayabusa/releases/download/v'+$ver+'/'+$an) }");
+  L.push("Write-Output ('Asset: '+$an); Write-Output ('URL: '+$u)");
+  L.push("$z=Join-Path $env:TEMP 'hayabusa_dl.zip'");
+  L.push("$x=Join-Path $env:TEMP ('hayabusa_x_'+[guid]::NewGuid().ToString('N'))");
+  L.push("Invoke-WebRequest -Uri $u -OutFile $z -Headers $hdr");
+  L.push("if(Test-Path $x){ Remove-Item $x -Recurse -Force }");
+  L.push("Expand-Archive -Force -Path $z -DestinationPath $x");
+  L.push("$exe=Get-ChildItem -Path $x -Recurse -Filter 'hayabusa*.exe' | Select-Object -First 1");
+  L.push("if(-not $exe){ throw 'hayabusa*.exe not found in the downloaded archive' }");
+  L.push("$src=Split-Path $exe.FullName");
+  L.push("New-Item -ItemType Directory -Force -Path $target | Out-Null");
+  L.push("Copy-Item -Path (Join-Path $src '*') -Destination $target -Recurse -Force");
+  L.push("Copy-Item (Join-Path $target $exe.Name) (Join-Path $target 'hayabusa.exe') -Force");   // alias from the freshly-extracted exe (deterministic)
+  L.push("Get-ChildItem -Path $target -Filter 'hayabusa-*-win-*.exe' | Where-Object { $_.Name -ne $exe.Name } | Remove-Item -Force -ErrorAction SilentlyContinue");   // purge stale arch exes (e.g. old x86)
+  L.push("Remove-Item $z,$x -Recurse -Force -ErrorAction SilentlyContinue");
+  L.push("Write-Output ('INSTALL_OK '+$an)");
+  try{ var f=fso.CreateTextFile(ps1,true); f.Write(L.join("\r\n")); f.Close(); }
+  catch(ew){ setStatus("Could not stage installer script: "+ew.message,"err"); return; }
+  try{
+    var r=runBat(['powershell -NoProfile -ExecutionPolicy Bypass -File "'+ps1+'" > "__LOG__" 2>&1'], true);
+    appendLog("--- Hayabusa download / install ---\n"+r.log);
+    try{ fso.DeleteFile(ps1); }catch(e0){}
+    if((r.log+"").indexOf("INSTALL_OK")>=0){ setStatus("Hayabusa installed to "+target,"ok"); evaluateTooling(false); }
+    else if(confirm("Automatic download failed — see the log (network/proxy, or no matching asset for this architecture).\n\nOpen the Hayabusa releases page to download it manually instead?")) openReleases();
+    else setStatus("Download/install failed — see log","err");
+  }catch(e){ setStatus("Download failed: "+e.message,"err"); }
+}
+
+/* ---------- actions ---------- */
+function checkVersion(){
+  if(!EXE || !fileExists(EXE)){ LOCAL_VER=""; updateVerPill(); setStatus("hayabusa.exe not found","err"); return; }
+  try{
+    var r=runBat(['"'+batEsc(EXE)+'" help > "__LOG__" 2>&1']);   // 3.x has no -V/-h; version is line 1 of `help`
+    var m=r.log.match(/hayabusa\s+v?([0-9]+\.[0-9]+\.[0-9]+)/i);
+    if(m){ LOCAL_VER=m[1]; updateVerPill(); setStatus("Hayabusa v"+LOCAL_VER+" detected","ok"); }
+    else { LOCAL_VER=""; updateVerPill(); setStatus("Ran hayabusa but could not parse version — see log","err"); appendLog(r.log); }
+  }catch(e){ LOCAL_VER=""; updateVerPill(); setStatus("Version check failed: "+e.message,"err"); }
+}
+function updateRules(){
+  if(!EXE||!fileExists(EXE)){ setStatus("hayabusa.exe not found — can't update rules","err"); return; }
+  if(BUSY){ setStatus("A run is already in progress — wait for it to finish.","err"); return; }
+  BUSY=true; $("updBtn").disabled=true; $("procBtn").disabled=true;
+  setStatus("Updating Sigma rules… (a console window shows progress)","muted");
+  appendLog("Running: \""+EXE+"\" update-rules");
+  var ctx=runBatAsync([
+    "echo Updating Hayabusa Sigma rules...",
+    'cd /d "'+batEsc(EXE_DIR)+'"',
+    '"'+batEsc(EXE)+'" update-rules >> "__LOG__" 2>&1',
+    "echo.",
+    "echo Done. This window closes automatically."
+  ], true);
+  ctx.onTick=function(s){ setStatus("Updating rules… "+s+"s","muted"); };
+  ctx.onTimeout=function(){ BUSY=false; $("updBtn").disabled=false; $("procBtn").disabled=false; setStatus("Rule update still running after 60 min — stopped watching.","err"); };
+  ctx.onDone=function(log){ BUSY=false; $("updBtn").disabled=false; $("procBtn").disabled=false;
+    appendLog("--- update-rules ---\n"+log);
+    if(/error|failed|panic/i.test(log) && !/updated|up to date|no updates/i.test(log)) setStatus("Rule update reported problems — see log (offline?). Existing rules are still usable.","err");
+    else setStatus("Sigma rules updated.","ok"); };
+  window.setTimeout(function(){ pollDone(ctx); }, 1000);
+}
+function canListFolder(p){
+  try{ var fso=new ActiveXObject("Scripting.FileSystemObject");
+    var e=new Enumerator(fso.GetFolder(p).Files); e.atEnd(); return true; }catch(err){ return false; }
+}
+
+function buildTimelineCmd(inp, inmode, csvOut){
+  var flag=(inmode==="d")?"-d":"-f";
+  // --no-wizard: non-interactive (mandatory). --ISO-8601: always-UTC "…Z" timestamps (matches parser + sample). -C clobber. -K no ANSI in log.
+  var extra=" --no-wizard -C --ISO-8601 --no-color";
+  if($("optQuiet").checked) extra+=" -q";
+  var mn=$("optMin").value; if(mn && mn!=="informational") extra+=" -m "+mn;
+  var pf=$("optProfile").value; if(pf && pf!=="standard") extra+=" -p "+pf;
+  return '"'+batEsc(EXE)+'" csv-timeline '+flag+' "'+batEsc(inp)+'" -o "'+batEsc(csvOut)+'"'+extra;
+}
+function processHb(){
+  var inp=$("inPath").value;
+  var outdir=$("outDir").value;
+  var inmode=$("inMode").value;
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  if(inmode==="d"){
+    if(!inp||!fso.FolderExists(inp)){ setStatus("Directory not found: "+inp,"err"); return; }
+    if(!canListFolder(inp)){ setStatus("Access denied reading "+inp+" — live event logs need an ELEVATED run. Relaunch as administrator, or point at a collected copy.","err"); return; }
+  } else { if(!inp||!fso.FileExists(inp)){ setStatus("File not found: "+inp,"err"); return; } }
+  if(!outdir){ setStatus("Set an output directory","err"); return; }
+  if(!EXE||!fileExists(EXE)){ setStatus("hayabusa.exe not found — install it first (Get Hayabusa…)","err"); return; }
+  if(BUSY){ setStatus("A run is already in progress — wait for it to finish.","err"); return; }
+  var csvOut=outdir+"\\"+nowStamp()+"_Hayabusa_Timeline.csv";
+  var cmd=buildTimelineCmd(inp, inmode, csvOut);
+  var doUpd=$("optUpd").checked;
+  appendLog("Running Hayabusa"+(doUpd?" (update-rules first)":"")+":\n"+cmd
+    +"\nA console window shows progress; the app stays responsive and loads results automatically when done.");
+  BUSY=true; $("procBtn").disabled=true; $("updBtn").disabled=true;
+  var lines=[
+    'if not exist "'+batEsc(outdir)+'" mkdir "'+batEsc(outdir)+'"',
+    'cd /d "'+batEsc(EXE_DIR)+'"',
+    "echo Hayabusa is processing:",
+    'echo   '+batEsc(inp),
+    "echo Output: "+batEsc(csvOut),
+    "echo This window closes automatically when finished.",
+    "echo."
+  ];
+  if(doUpd){ lines.push("echo Updating Sigma rules first...");
+    lines.push('"'+batEsc(EXE)+'" update-rules >> "__LOG__" 2>&1'); lines.push("echo."); }
+  lines.push("echo Running detection timeline...");
+  lines.push(cmd+' >> "__LOG__" 2>&1');
+  var ctx=runBatAsync(lines, true);
+  ctx.onTick=function(s){ setStatus("Hayabusa running… "+s+"s elapsed (app responsive; results load when done)","muted"); };
+  ctx.onTimeout=function(){ BUSY=false; $("procBtn").disabled=false; $("updBtn").disabled=false; setStatus("Hayabusa still running after 60 min — stopped watching. Check the output folder / console.","err"); };
+  ctx.onDone=function(log){ BUSY=false; $("procBtn").disabled=false; $("updBtn").disabled=false; processHbDone(log,outdir,csvOut); };
+  setStatus("Hayabusa starting…","muted");
+  window.setTimeout(function(){ pollDone(ctx); }, 1000);
+}
+function processHbDone(log,outdir,csvOut){
+  appendLog("--- Hayabusa output ---\n"+log);
+  LASTOUTDIR=outdir;
+  if(fileExists(csvOut)){
+    // Hayabusa writes a 0-byte file when nothing matched — report that as success, not a parse error
+    if(fileSize(csvOut)<3){
+      populateProduced(listCsvFiles(outdir));
+      setStatus("Hayabusa ran OK but found 0 detections in this input at min-level '"+$("optMin").value+"'. Point at a broader log set (or lower the min level) and re-run.","ok");
+      return;
+    }
+    populateProduced(listCsvFiles(outdir));
+    try{ $("producedSel").value=csvOut; }catch(e){}
+    setStatus("Timeline produced: "+baseName(csvOut)+" — loading…","ok");
+    loadCsvFile(csvOut);
+    return;
+  }
+  // no output — diagnose
+  if(/no such|not found|does not exist/i.test(log) && /evtx/i.test(log))
+    setStatus("Hayabusa found no .evtx to parse in that input. Check the path.","err");
+  else if(/denied|permission/i.test(log))
+    setStatus("Hayabusa was denied access — an elevated run is needed for live logs.","err");
+  else if(/wizard/i.test(log))
+    setStatus("Hayabusa appears to have hit the interactive wizard — the --no-wizard flag may be unsupported by this build. Run 'hayabusa csv-timeline -h' and check the flag name.","err");
+  else
+    setStatus("Hayabusa produced no CSV — see the log for why.","err");
+  populateProduced(listCsvFiles(outdir));
+}
+function listCsvFiles(dir){
+  var fso=new ActiveXObject("Scripting.FileSystemObject"), out=[];
+  if(!fso.FolderExists(dir)) return out;
+  var e=new Enumerator(fso.GetFolder(dir).Files);
+  for(; !e.atEnd(); e.moveNext()){ var f=e.item(); if(/\.csv$/i.test(f.Name+"")) out.push({name:f.Name+"", path:f.Path+"", size:f.Size}); }
+  out.sort(function(a,b){ return a.name<b.name?1:(a.name>b.name?-1:0); });
+  return out;
+}
+function fmtSize(n){ if(!n) return "0 B"; var u=["B","KB","MB","GB"], i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return n.toFixed(i?1:0)+" "+u[i]; }
+function populateProduced(list){
+  var sel=$("producedSel"); sel.innerHTML="";
+  for(var i=0;i<list.length;i++){
+    var lab=list[i].name+"  ("+fmtSize(list[i].size)+")";
+    var o=document.createElement("option"); o.value=list[i].path; o.text=lab; sel.add(o);
+  }
+  showEl("producedRow", list.length>0);
+}
+function openDir(){ var d=$("outDir").value; if(!d){ setStatus("No output directory set","err"); return; }
+  try{ new ActiveXObject("WScript.Shell").Run('explorer.exe "'+d+'"',1,false); }catch(e){ setStatus("Could not open folder: "+e.message,"err"); } }
+
+/* ---------- CSV parser (RFC4180) ---------- */
+function countQuotes(s){ var c=0, idx=-1; while((idx=s.indexOf('"',idx+1))>=0) c++; return c; }
+function parseCSVLine(line){
+  if(line.indexOf('"')<0) return line.split(",");
+  var out=[], field="", q=false, i=0, n=line.length;
+  while(i<n){ var c=line.charAt(i);
+    if(q){ if(c==='"'){ if(line.charAt(i+1)==='"'){ field+='"'; i+=2; continue; } q=false; i++; continue; } field+=c; i++; continue; }
+    if(c==='"'){ q=true; i++; continue; }
+    if(c===','){ out.push(field); field=""; i++; continue; }
+    field+=c; i++;
+  }
+  out.push(field); return out;
+}
+function parseCSV(text){
+  if(text.charCodeAt(0)===0xFEFF) text=text.substring(1);
+  var lines=text.split("\n"), rows=[], i=0, n=lines.length;
+  while(i<n){
+    var line=lines[i]; i++;
+    var qc=countQuotes(line);
+    while((qc%2)===1 && i<n){ line+="\n"+lines[i]; qc+=countQuotes(lines[i]); i++; }
+    if(line.charAt(line.length-1)==='\r') line=line.substring(0,line.length-1);
+    if(line==="") continue;
+    rows.push(parseCSVLine(line));
+  }
+  return rows;
+}
+
+/* ---------- ingest dispatch ---------- */
+function loadCsvFile(path){
+  try{
+    setStatus("Reading "+baseName(path)+"…","muted");
+    var text=readUtf8(path);
+    var raw=parseCSV(text);
+    if(!raw||!raw.length){ setStatus("Empty / unparseable CSV","err"); return; }
+    var idx={}, head=raw[0];
+    for(var h=0;h<head.length;h++) idx[trimStr(head[h])]=h;
+    if(("Timestamp" in idx) && ("RuleTitle" in idx) && ("Level" in idx))
+      ingestHayabusa(raw, idx, head, baseName(path));
+    else
+      ingestGeneric(raw, head, baseName(path));
+  }catch(e){ setStatus("Could not read CSV: "+e.message,"err"); }
+}
+function cell(rw,i){ return (i>=0&&i<rw.length)?rw[i]:""; }
+
+/* ---------- Hayabusa ingest ---------- */
+var KNOWN_COLS={Timestamp:1,RuleTitle:1,Level:1,Computer:1,Channel:1,EventID:1,RecordID:1,Details:1,ExtraFieldInfo:1,RuleID:1,EventTime:1};
+function ingestHayabusa(raw, idx, head, srcLabel){
+  function gi(n){ return (n in idx)?idx[n]:-1; }
+  var iTs=gi("Timestamp"), iTitle=gi("RuleTitle"), iLvl=gi("Level"), iComp=gi("Computer"),
+      iCh=gi("Channel"), iEid=gi("EventID"), iRid=gi("RecordID"), iDet=gi("Details"),
+      iExtra=gi("ExtraFieldInfo"), iRule=gi("RuleID"), iEt=gi("EventTime");
+  // any non-core columns (verbose/super-verbose profiles) → surfaced in detail pane
+  var extraColIdx=[];
+  for(var c=0;c<head.length;c++){ var nm=trimStr(head[c]); if(nm && !KNOWN_COLS[nm]) extraColIdx.push({name:nm,i:c}); }
+  ROWS=[];
+  for(var r=1;r<raw.length;r++){
+    var rw=raw[r]; if(rw.length<3) continue;
+    var ts=trimStr(cell(rw,iTs)); if(!ts) continue;
+    var title=trimStr(cell(rw,iTitle));
+    var lkey=levelKey(cell(rw,iLvl));
+    var comp=trimStr(cell(rw,iComp));
+    var channel=trimStr(cell(rw,iCh));
+    var eid=trimStr(cell(rw,iEid));
+    var det=cell(rw,iDet), extra=cell(rw,iExtra);
+    var xtra=[]; for(var e=0;e<extraColIdx.length;e++){ var v=cell(rw,extraColIdx[e].i); if(trimStr(v)!=="" && trimStr(v)!=="-") xtra.push({name:extraColIdx[e].name, val:v}); }
+    var rec={
+      ts:ts, msTs:msOf(ts), dayTs:dayOf(ts),
+      title:title, titleL:title.toLowerCase(),
+      lkey:lkey, rank:LVLMETA[lkey].rank,
+      computer:comp, computerL:comp.toLowerCase(),
+      channel:channel, eid:eid, recordId:trimStr(cell(rw,iRid)),
+      details:det, detSubs:splitSubs(det),
+      extra:extra, extraSubs:splitSubs(extra),
+      ruleId:trimStr(cell(rw,iRule)), eventTime:trimStr(cell(rw,iEt)),
+      xtra:xtra,
+      iocHits:[], noiseHit:false, score:0, tags:[], reasons:[], priority:false
+    };
+    rec.blob=(title+" "+det+" "+extra+" "+comp+" "+channel+" "+eid+" "+rec.ruleId).toLowerCase();
+    ROWS.push(rec);
+  }
+  if(!ROWS.length){ ingestGeneric(raw, head, srcLabel); return; }
+  rescoreAll();
+  setMode("hb");
+  var comps=[]; for(var i=0;i<ROWS.length;i++) comps.push(ROWS[i].computer);
+  populateComputerFilter(distinctVals(comps));
+  $("results").className="";
+  var span=timeSpanLabel(ROWS);
+  $("srcpill").innerHTML=nf(ROWS.length)+" detections &middot; "+esc(srcLabel);
+  QUERY=""; $("q").value=""; DFROM=0; DTO=0; $("dfrom").value=""; $("dto").value="";
+  CURLVL="all"; TITLEONLY=""; renderTitleFilterChip(); highlightLvl();
+  SORTKEY=0; SORTDIR=-1; TSORTKEY=-1;
+  setView("chrono", true);
+  closeDetail();
+  setStatus("Loaded "+nf(ROWS.length)+" detections"+(span?(" spanning "+span):"")+"","ok");
+  render();
+}
+function timeSpanLabel(rows){
+  var mn=0,mx=0; for(var i=0;i<rows.length;i++){ var m=rows[i].msTs; if(m){ if(!mn||m<mn)mn=m; if(m>mx)mx=m; } }
+  if(!mn) return "";
+  return fmtShortTs(msToTs(mn))+" → "+fmtShortTs(msToTs(mx))+" UTC";
+}
+
+/* ---------- scoring ---------- */
+function rescoreAll(){ for(var i=0;i<ROWS.length;i++) scoreRec(ROWS[i]); }
+function scoreRec(r){
+  var tags=[], reasons=[], score=r.rank;
+  r.iocHits=[];
+  if(IOCS.length){
+    for(var t=0;t<IOCS.length;t++){ var term=IOCS[t]; if(r.blob.indexOf(term)>=0){ r.iocHits.push(term); if(r.iocHits.length>=4) break; } }
+    if(r.iocHits.length){ score+=3; tags.push("IOC"); reasons.push("IOC/keyword hit: "+r.iocHits.join(", ")); }
+  }
+  r.noiseHit=false;
+  if(NOISE.length){
+    for(var k=0;k<NOISE.length;k++){ var nt=NOISE[k]; if(r.titleL.indexOf(nt)>=0 || r.blob.indexOf(nt)>=0){ r.noiseHit=true; break; } }
+    if(r.noiseHit){ tags.push("NOISE"); reasons.push("Matches noise/known-FP list"); }
+  }
+  r.tags=tags; r.reasons=reasons; r.score=score;
+  r.priority=(r.rank>=3 || r.iocHits.length>0);
+}
+
+/* ---------- filtering ---------- */
+function baseFilter(r){
+  if(CURCOMP && r.computer!==CURCOMP) return false;
+  if(TITLEONLY && r.title!==TITLEONLY) return false;
+  if(DFROM && (!r.dayTs || r.dayTs<DFROM)) return false;
+  if(DTO && (!r.dayTs || r.dayTs>DTO)) return false;
+  if(NOISE.length && !SHOWNOISE && r.noiseHit) return false;
+  if(QUERY && r.blob.indexOf(QUERY)<0) return false;
+  return true;
+}
+function passLevel(r){
+  if(CURLVL==="all") return true;
+  if(CURLVL==="ioc") return r.iocHits.length>0;
+  return r.lkey===CURLVL;
+}
+function filteredRows(){
+  var out=[];
+  for(var i=0;i<ROWS.length;i++){ var r=ROWS[i]; if(baseFilter(r) && passLevel(r)) out.push(r); }
+  return out;
+}
+
+/* ---------- level filter buttons ---------- */
+function updateLvlCounts(){
+  var c={all:0,crit:0,high:0,med:0,low:0,info:0,ioc:0};
+  for(var i=0;i<ROWS.length;i++){ var r=ROWS[i]; if(!baseFilter(r)) continue;
+    c.all++; c[r.lkey]++; if(r.iocHits.length) c.ioc++; }
+  var names={all:"All",crit:"Critical",high:"High",med:"Medium",low:"Low",info:"Info",ioc:"IOC hits"};
+  var bs=$("lvlCats").getElementsByTagName("button");
+  for(var j=0;j<bs.length;j++){ var k=bs[j].getAttribute("data-lvl");
+    if(k) bs[j].innerHTML=names[k]+" ("+nf(c[k])+")"; }
+}
+function highlightLvl(){
+  var bs=$("lvlCats").getElementsByTagName("button");
+  for(var j=0;j<bs.length;j++){ if(bs[j].getAttribute("data-lvl")) bs[j].className=(bs[j].getAttribute("data-lvl")===CURLVL)?"btn on":"btn"; }
+}
+
+/* ---------- view switching ---------- */
+function setView(v, quiet){
+  VIEW=v;
+  $("vChrono").className=(v==="chrono")?"btn on":"btn";
+  $("vSev").className=(v==="sev")?"btn on":"btn";
+  $("vTitle").className=(v==="title")?"btn on":"btn";
+  $("tableTitle").innerHTML=(v==="sev")?"Detections by severity":((v==="title")?"Rules (grouped by title)":"Detections (chronological)");
+  if(!quiet) render();
+}
+function render(){
+  if(MODE==="generic"){ renderGeneric(); return; }
+  if(!ROWS.length) return;
+  updateLvlCounts();
+  renderOverview(filteredRows());
+  if(VIEW==="sev") renderSev();
+  else if(VIEW==="title") renderTitle();
+  else renderChrono();
+}
+
+/* ---------- overview / cards ---------- */
+function topList(obj,n){ var a=[],k; for(k in obj){ if(obj.hasOwnProperty(k)) a.push([k,obj[k]]); }
+  a.sort(function(x,y){ return y[1]-x[1]; }); return a.slice(0,n); }
+function stat(n,l,cls){ return '<span class="stat'+(cls?(" "+cls):"")+'"><span class="n">'+esc(n)+'</span><span class="l">'+esc(l)+'</span></span>'; }
+function bar(label,frac,val,q){
+  var lc=q?' lnk" data-q="'+esc(q):'';
+  return '<div class="brow"><span class="blab'+lc+'" title="'+esc(label)+'">'+esc(label)+'</span>'
+    +'<span class="btrack"><span class="bfill" style="width:'+(frac*100).toFixed(1)+'%"></span></span>'
+    +'<span class="bval">'+esc(val)+'</span></div>';
+}
+function listRow(label,val,q,cls){
+  var lc=q?' lnk" data-q="'+esc(q):'';
+  return '<div class="brow"><span class="blab'+lc+'" title="'+esc(label)+'" style="width:56%">'+esc(label)+'</span>'
+    +'<span class="bval" style="width:40%;'+(cls||"")+'">'+esc(val)+'</span></div>';
+}
+function fmtShortTs(s){ var m=String(s).match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/); return m?(m[1]+" "+m[2]):String(s); }
+function msToTs(ms){ var d=new Date(ms); function p(x){return (x<10?"0":"")+x;}
+  return d.getUTCFullYear()+"-"+p(d.getUTCMonth()+1)+"-"+p(d.getUTCDate())+" "+p(d.getUTCHours())+":"+p(d.getUTCMinutes())+":"+p(d.getUTCSeconds()); }
+function renderOverview(rows){
+  var i,r, titles={}, comps={}, lc={crit:0,high:0,med:0,low:0,info:0}, ioc=0, noise=0, minMs=0, maxMs=0;
+  var ruleCount={}, compCount={};
+  for(i=0;i<rows.length;i++){ r=rows[i];
+    titles[r.title]=1; comps[r.computer]=1; lc[r.lkey]++;
+    ruleCount[r.title]=(ruleCount[r.title]||0)+1;
+    if(r.computer) compCount[r.computer]=(compCount[r.computer]||0)+1;
+    if(r.iocHits.length) ioc++;
+    if(r.noiseHit) noise++;
+    if(r.msTs){ if(!minMs||r.msTs<minMs) minMs=r.msTs; if(r.msTs>maxMs) maxMs=r.msTs; }
+  }
+  var dt=0,k; for(k in titles){ if(titles.hasOwnProperty(k)) dt++; }
+  var dc=0; for(k in comps){ if(comps.hasOwnProperty(k)) dc++; }
+  var rng=(minMs? (fmtShortTs(msToTs(minMs))+" → "+fmtShortTs(msToTs(maxMs))) : "—");
+  $("statbar").innerHTML=
+    stat(nf(rows.length),"detections")+stat(nf(dt),"rules")+stat(nf(dc),"computers")+
+    stat(nf(lc.crit),"critical","crit")+stat(nf(lc.high),"high","high")+stat(nf(lc.med),"medium","med")+
+    stat(nf(lc.low),"low","low")+stat(nf(lc.info),"info","info")+
+    (IOCS.length?stat(nf(ioc),"IOC hits","crit"):"")+
+    (NOISE.length?stat(nf(noise),SHOWNOISE?"noise (shown)":"noise (hidden)"):"")+
+    '<span class="stat" style="min-width:280px"><span class="n" style="font-size:12px">'+esc(rng)+'</span><span class="l">time span (UTC)</span></span>';
+  // col 1: top rules by count
+  var top=topList(ruleCount,12), h="", max=top.length?top[0][1]:1;
+  for(i=0;i<top.length;i++){ h+=bar(top[i][0], max?top[i][1]/max:0, nf(top[i][1]), top[i][0]); }
+  $("topRules").innerHTML=h||'<span class="muted">none</span>';
+  // col 2: top computers by count
+  var tc=topList(compCount,12); h=""; max=tc.length?tc[0][1]:1;
+  for(i=0;i<tc.length;i++){ h+=bar(tc[i][0], max?tc[i][1]/max:0, nf(tc[i][1]), tc[i][0]); }
+  $("topComps").innerHTML=h||'<span class="muted">none</span>';
+  // col 3: critical/high most recent
+  var sev=[]; for(i=0;i<rows.length;i++){ if(rows[i].rank>=3) sev.push(rows[i]); }
+  sev.sort(function(a,b){ return b.rank-a.rank || b.msTs-a.msTs; });
+  h=""; for(i=0;i<sev.length&&i<12;i++){ r=sev[i];
+    h+=listRow(LVLMETA[r.lkey].name.charAt(0)+" · "+r.title, fmtShortTs(r.ts), r.title, "color:"+(r.rank>=4?"#ff6b6b":"#f0883e")); }
+  $("topSev").innerHTML=h||'<span class="ok">No Critical/High detections in view</span>';
+}
+
+/* ---------- shared detection cells ---------- */
+function levelChip(lkey){ return '<span class="chip '+LVLMETA[lkey].cls+'">'+esc(LVLMETA[lkey].name)+'</span>'; }
+function iocTag(r){ var t=""; if(r.iocHits.length) t+='<span class="tag ioc" title="'+esc(r.reasons.join("; "))+'">IOC</span>';
+  if(r.noiseHit) t+='<span class="tag noise" title="matches noise list">NOISE</span>'; return t; }
+
+/* ---------- chronological view ---------- */
+var CCOLS=[
+  {h:"Timestamp (UTC)", sk:function(r){return r.msTs;}, cell:function(r){return '<td class="mono first">'+esc(r.ts)+'</td>';}},
+  {h:"Level", sk:function(r){return r.rank;}, cell:function(r){return '<td>'+levelChip(r.lkey)+iocTag(r)+'</td>';}},
+  {h:"Rule title", sk:function(r){return r.titleL;}, cell:function(r){return '<td class="lnk" data-q="'+esc(r.title)+'" title="'+esc(r.title)+'">'+esc(r.title)+'</td>';}},
+  {h:"Computer", sk:function(r){return r.computerL;}, cell:function(r){return '<td class="mono" title="'+esc(r.computer)+'">'+esc(r.computer)+'</td>';}},
+  {h:"Channel", sk:function(r){return String(r.channel).toLowerCase();}, cell:function(r){return '<td class="mono muted" title="'+esc(r.channel)+'">'+esc(r.channel)+'</td>';}},
+  {h:"EventID", sk:function(r){var n=parseInt(r.eid,10); return isFinite(n)?n:r.eid;}, cell:function(r){return '<td class="mono" style="text-align:right">'+esc(r.eid)+'</td>';}},
+  {h:"Details", sk:function(r){return String(r.details).toLowerCase();}, cell:function(r){return '<td class="mono" title="'+esc(r.details)+'">'+esc(trunc(r.details,110))+'</td>';}}
+];
+function rowClass(r){ var c=""; if(r.lkey==="crit") c="row-crit"; else if(r.lkey==="high") c="row-high";
+  if(r.iocHits.length) c+=(c?" ":"")+"ioc"; return c; }
+function renderChrono(){
+  var rows=filteredRows();
+  var sk=CCOLS[SORTKEY].sk, dir=SORTDIR;
+  rows.sort(function(a,b){ var x=sk(a),y=sk(b);
+    if(typeof x==="number"&&typeof y==="number") return (x-y)*dir;
+    x=String(x); y=String(y); return x<y?-dir:(x>y?dir:0); });
+  var shown=rows.length>MAXROWS?MAXROWS:rows.length;
+  var html="<thead><tr>";
+  for(var c=0;c<CCOLS.length;c++){ var arrow=(SORTKEY===c)?(SORTDIR>0?" ▲":" ▼"):"";
+    html+='<th data-k="'+c+'">'+esc(CCOLS[c].h)+arrow+'</th>'; }
+  html+="</tr></thead><tbody>";
+  for(var i=0;i<shown;i++){ var r=rows[i]; var rc=rowClass(r);
+    html+='<tr data-i="'+i+'"'+(rc?(' class="'+rc+'"'):'')+' style="cursor:pointer">';
+    for(var k=0;k<CCOLS.length;k++){ html+=CCOLS[k].cell(r); }
+    html+="</tr>";
+  }
+  html+="</tbody>";
+  $("tbl").innerHTML=html;
+  $("count").innerHTML=nf(rows.length)+" detections"+(shown<rows.length?(" (showing "+nf(shown)+")"):"");
+  var ths=$("tbl").getElementsByTagName("th");
+  for(var j=0;j<ths.length;j++){ ths[j].onclick=function(){ var kk=parseInt(this.getAttribute("data-k"),10);
+    if(SORTKEY===kk) SORTDIR*=-1; else { SORTKEY=kk; SORTDIR=1; } renderChrono(); }; }
+  applyFreeze();
+  window.__viewRows=rows.slice(0,shown);
+  window.__fullRows=rows;
+}
+
+/* ---------- by-severity view (grouped) ---------- */
+var SCOLS=[
+  {h:"Timestamp (UTC)"},{h:"Rule title"},{h:"Computer"},{h:"Channel"},{h:"EventID"},{h:"Details"}
+];
+function sevCells(r){
+  return '<td class="mono first">'+esc(r.ts)+'</td>'
+    +'<td class="lnk" data-q="'+esc(r.title)+'" title="'+esc(r.title)+'">'+esc(r.title)+iocTag(r)+'</td>'
+    +'<td class="mono" title="'+esc(r.computer)+'">'+esc(r.computer)+'</td>'
+    +'<td class="mono muted" title="'+esc(r.channel)+'">'+esc(r.channel)+'</td>'
+    +'<td class="mono" style="text-align:right">'+esc(r.eid)+'</td>'
+    +'<td class="mono" title="'+esc(r.details)+'">'+esc(trunc(r.details,110))+'</td>';
+}
+function renderSev(){
+  var rows=filteredRows();
+  // bucket by level, sort each chrono desc
+  var buckets={crit:[],high:[],med:[],low:[],info:[]};
+  for(var i=0;i<rows.length;i++) buckets[rows[i].lkey].push(rows[i]);
+  var display=[], total=0, capped=false;
+  var html="<thead><tr>";
+  for(var c=0;c<SCOLS.length;c++) html+='<th>'+esc(SCOLS[c].h)+'</th>';
+  html+="</tr></thead><tbody>";
+  for(var b=0;b<LVLKEYS.length;b++){
+    var lk=LVLKEYS[b], arr=buckets[lk]; if(!arr.length) continue;
+    arr.sort(function(a,b2){ return b2.msTs-a.msTs; });
+    var open=!!GOPEN[lk];
+    html+='<tr class="grp" data-grp="'+lk+'"><td colspan="'+SCOLS.length+'">'
+      +(open?"▼ ":"▶ ")+levelChip(lk)+' &nbsp;'+nf(arr.length)+' detection'+(arr.length===1?"":"s")
+      +' <span class="muted" style="font-weight:normal">'+(open?"(click to collapse)":"(click to expand)")+'</span></td></tr>';
+    if(open){
+      var lim=arr.length>MAXROWS?MAXROWS:arr.length; if(lim<arr.length) capped=true;
+      for(var j=0;j<lim;j++){ var r=arr[j]; var rc=rowClass(r); display.push(r);
+        html+='<tr data-i="'+(display.length-1)+'"'+(rc?(' class="'+rc+'"'):'')+' style="cursor:pointer">'+sevCells(r)+"</tr>"; }
+      if(lim<arr.length) html+='<tr><td colspan="'+SCOLS.length+'" class="muted">… '+nf(arr.length-lim)+' more in this group (export writes all)</td></tr>';
+    }
+    total+=arr.length;
+  }
+  html+="</tbody>";
+  $("tbl").innerHTML=html;
+  $("count").innerHTML=nf(total)+" detections"+(capped?" (some groups capped)":"");
+  applyFreeze();
+  window.__viewRows=display;
+  window.__fullRows=rows;
+}
+
+/* ---------- by-title view (aggregated) ---------- */
+var TCOLS=[
+  {h:"Rule title", sk:function(g){return g.titleL;}},
+  {h:"Max level", sk:function(g){return g.rank;}},
+  {h:"Count", sk:function(g){return g.count;}},
+  {h:"Computers", sk:function(g){return g.compN;}},
+  {h:"First seen (UTC)", sk:function(g){return g.minMs;}},
+  {h:"Last seen (UTC)", sk:function(g){return g.maxMs;}}
+];
+function buildTitleGroups(rows){
+  var map={}, order=[];
+  for(var i=0;i<rows.length;i++){ var r=rows[i]; var g=map[r.title];
+    if(!g){ g=map[r.title]={title:r.title, titleL:r.titleL, rank:r.rank, lkey:r.lkey, count:0, comps:{}, compN:0,
+      minMs:0, maxMs:0, minTs:"", maxTs:"", ioc:0}; order.push(g); }
+    g.count++;
+    if(r.rank>g.rank){ g.rank=r.rank; g.lkey=r.lkey; }
+    if(r.computer && !g.comps[r.computer]){ g.comps[r.computer]=1; g.compN++; }
+    if(r.iocHits.length) g.ioc++;
+    if(r.msTs){ if(!g.minMs||r.msTs<g.minMs){ g.minMs=r.msTs; g.minTs=r.ts; } if(r.msTs>g.maxMs){ g.maxMs=r.msTs; g.maxTs=r.ts; } }
+  }
+  return order;
+}
+function renderTitle(){
+  var rows=filteredRows();
+  var groups=buildTitleGroups(rows);
+  if(TSORTKEY<0){ groups.sort(function(a,b){ return b.rank-a.rank || b.count-a.count; }); }
+  else { var sk=TCOLS[TSORTKEY].sk, dir=TSORTDIR;
+    groups.sort(function(a,b){ var x=sk(a),y=sk(b);
+      if(typeof x==="number"&&typeof y==="number") return (x-y)*dir;
+      x=String(x); y=String(y); return x<y?-dir:(x>y?dir:0); }); }
+  var shown=groups.length>MAXROWS?MAXROWS:groups.length;
+  var html="<thead><tr>";
+  for(var c=0;c<TCOLS.length;c++){ var arrow=(TSORTKEY===c)?(TSORTDIR>0?" ▲":" ▼"):"";
+    html+='<th data-k="'+c+'">'+esc(TCOLS[c].h)+arrow+'</th>'; }
+  html+="</tr></thead><tbody>";
+  for(var i=0;i<shown;i++){ var g=groups[i];
+    html+='<tr data-t="'+i+'" style="cursor:pointer">'
+      +'<td title="'+esc(g.title)+'">'+esc(g.title)+(g.ioc?' <span class="tag ioc">IOC</span>':'')+'</td>'
+      +'<td>'+levelChip(g.lkey)+'</td>'
+      +'<td class="mono" style="text-align:right">'+nf(g.count)+'</td>'
+      +'<td class="mono" style="text-align:right">'+nf(g.compN)+'</td>'
+      +'<td class="mono">'+esc(g.minTs)+'</td>'
+      +'<td class="mono">'+esc(g.maxTs)+'</td></tr>';
+  }
+  html+="</tbody>";
+  $("tbl").innerHTML=html;
+  $("count").innerHTML=nf(groups.length)+" rules"+(shown<groups.length?(" (showing "+nf(shown)+")"):"");
+  var ths=$("tbl").getElementsByTagName("th");
+  for(var j=0;j<ths.length;j++){ ths[j].onclick=function(){ var kk=parseInt(this.getAttribute("data-k"),10);
+    if(TSORTKEY===kk) TSORTDIR*=-1; else { TSORTKEY=kk; TSORTDIR=1; } renderTitle(); }; }
+  applyFreeze();
+  window.__titleRows=groups.slice(0,shown);
+  window.__titleFull=groups;
+}
+
+function applyFreeze(){
+  var sc=$("tblScroll"); if(!sc) return;
+  var ths=$("tbl").getElementsByTagName("th"); var y=sc.scrollTop;
+  for(var i=0;i<ths.length;i++){ ths[i].style.top=y+"px"; }
+}
+
+/* ---------- detail panes ---------- */
+function hlWrap(txt){
+  var s=esc(txt), low=String(txt).toLowerCase();
+  for(var t=0;t<IOCS.length;t++){ if(low.indexOf(IOCS[t])>=0) return '<span class="hl-ioc">'+s+'</span>'; }
+  return s;
+}
+function subsBlock(subs){
+  if(!subs.length) return '<div class="dl"><span class="muted">(none)</span></div>';
+  var h='<div class="dl">';
+  for(var i=0;i<subs.length;i++){ var s=subs[i]; var ci=s.indexOf(":");
+    if(ci>0 && ci<40){ h+='<div><span class="kv">'+esc(s.substring(0,ci+1))+'</span> '+hlWrap(s.substring(ci+1))+'</div>'; }
+    else h+='<div>'+hlWrap(s)+'</div>';
+  }
+  h+='</div>'; return h;
+}
+function renderDetailEvent(rec){
+  DETREC=rec;
+  var h='<div style="font-size:14px;margin-bottom:6px"><b>'+esc(rec.title)+'</b> &nbsp;'+levelChip(rec.lkey)+' '+iocTag(rec)+'</div>';
+  if(rec.reasons.length){ h+='<div style="font-size:12px;color:#ff9b9b;margin-bottom:6px">';
+    for(var q=0;q<rec.reasons.length;q++) h+="&bull; "+esc(rec.reasons[q])+"<br>"; h+='</div>'; }
+  h+='<div class="mono muted" style="font-size:11px;margin-bottom:8px">'
+    +esc(rec.ts)+' (UTC) &middot; '+esc(rec.computer)+' &middot; '+esc(rec.channel)+' &middot; EventID '+esc(rec.eid)
+    +' &middot; RecordID '+esc(rec.recordId)+(rec.ruleId?(' &middot; RuleID '+esc(rec.ruleId)):'')
+    +(rec.eventTime&&rec.eventTime!==rec.ts?(' &middot; EventTime '+esc(rec.eventTime)):'')+'</div>';
+  h+='<h3>Details</h3>'+subsBlock(rec.detSubs);
+  if(rec.extraSubs.length){ h+='<h3>Extra field info</h3>'+subsBlock(rec.extraSubs); }
+  if(rec.xtra.length){ h+='<h3>Additional columns</h3><div class="dl">';
+    for(var e=0;e<rec.xtra.length;e++){ h+='<div><span class="kv">'+esc(rec.xtra[e].name)+':</span> '+hlWrap(rec.xtra[e].val)+'</div>'; }
+    h+='</div>'; }
+  $("detBody").innerHTML=h;
+  $("detCopy").style.display="";
+  showEl("detailCard",true);
+}
+function renderDetailTitle(g){
+  DETREC=null;
+  var h='<div style="font-size:14px;margin-bottom:6px"><b>'+esc(g.title)+'</b> &nbsp;'+levelChip(g.lkey)+(g.ioc?' <span class="tag ioc">IOC</span>':'')+'</div>';
+  h+='<div class="mono muted" style="font-size:12px;margin-bottom:8px">'
+    +nf(g.count)+' detection'+(g.count===1?"":"s")+' &middot; '+nf(g.compN)+' computer'+(g.compN===1?"":"s")
+    +' &middot; first '+esc(g.minTs)+' &middot; last '+esc(g.maxTs)+' (UTC)</div>';
+  h+='<div style="margin-bottom:8px"><button class="btn primary" id="drillBtn">View these '+nf(g.count)+' in chronological view</button></div>';
+  // sample rows
+  var samp=[]; for(var i=0;i<ROWS.length && samp.length<25;i++){ if(baseFilter(ROWS[i]) && ROWS[i].title===g.title) samp.push(ROWS[i]); }
+  samp.sort(function(a,b){ return b.msTs-a.msTs; });
+  h+='<h3>Sample detections (newest '+samp.length+' of '+nf(g.count)+')</h3><div class="dl">';
+  for(i=0;i<samp.length;i++){ var r=samp[i];
+    h+='<div><span class="kv">'+esc(r.ts)+'</span> &middot; '+esc(r.computer)+' &middot; EID '+esc(r.eid)+' &middot; '+esc(trunc(r.details,120))+'</div>'; }
+  h+='</div>';
+  $("detBody").innerHTML=h;
+  $("detCopy").style.display="none";
+  var db=$("drillBtn"); if(db) db.onclick=function(){ TITLEONLY=g.title; renderTitleFilterChip(); setView("chrono"); };
+  showEl("detailCard",true);
+}
+function renderTitleFilterChip(){
+  var w=$("tfiltWrap");
+  if(TITLEONLY){ w.innerHTML='<span class="tfilt">rule: '+esc(trunc(TITLEONLY,50))+'<span class="x" id="tfiltX">&times;</span></span>';
+    var x=$("tfiltX"); if(x) x.onclick=function(){ TITLEONLY=""; renderTitleFilterChip(); render(); }; }
+  else w.innerHTML="";
+}
+function closeDetail(){ DETREC=null; showEl("detailCard",false); $("detBody").innerHTML=""; }
+function copyDetail(){
+  if(!DETREC){ setStatus("No detection open","err"); return; }
+  var r=DETREC, out=[];
+  out.push(r.ts+" (UTC) | "+LVLMETA[r.lkey].name+" | "+r.title);
+  out.push("computer "+r.computer+" | "+r.channel+" | EventID "+r.eid+" | RecordID "+r.recordId+(r.ruleId?(" | RuleID "+r.ruleId):""));
+  if(r.detSubs.length){ out.push("Details:"); for(var i=0;i<r.detSubs.length;i++) out.push("  "+r.detSubs[i]); }
+  if(r.extraSubs.length){ out.push("ExtraFieldInfo:"); for(i=0;i<r.extraSubs.length;i++) out.push("  "+r.extraSubs[i]); }
+  try{ window.clipboardData.setData("Text", out.join("\r\n")); setStatus("Detection copied to clipboard","ok"); }
+  catch(e){ setStatus("Copy failed: "+e.message,"err"); }
+}
+
+/* ---------- generic grid (non-timeline CSVs) ---------- */
+function isNumStr(s){ s=trimStr(String(s)); return s!=="" && /^-?\d+(\.\d+)?$/.test(s); }
+function ingestGeneric(raw, head, srcLabel){
+  setMode("generic");
+  GHEAD=head; GROWS=[];
+  for(var i=1;i<raw.length;i++){ var rw=raw[i]; if(rw.length>=1 && !(rw.length===1 && rw[0]==="")) GROWS.push(rw); }
+  GSRC=srcLabel; GSRCIDX=-1;
+  for(var c=0;c<head.length;c++){ if(/^(Computer|SourceFile(name)?)$/i.test(trimStr(head[c]))){ GSRCIDX=c; break; } }
+  if(GSRCIDX>=0){ var sv=[]; for(var s=0;s<GROWS.length;s++) sv.push(GSRCIDX<GROWS[s].length?GROWS[s][GSRCIDX]:""); populateComputerFilter(distinctVals(sv)); }
+  else populateComputerFilter([]);
+  $("results").className="";
+  $("srcpill").innerHTML=nf(GROWS.length)+" rows &middot; "+esc(srcLabel)+" ("+GHEAD.length+" cols)";
+  QUERY=""; $("q").value=""; GSORTKEY=-1;
+  closeDetail();
+  setStatus("Loaded "+nf(GROWS.length)+" rows (generic table — not a csv-timeline output)","ok");
+  renderGeneric();
+}
+function renderGeneric(){
+  if(!GHEAD) return;
+  var q=QUERY, rows=[];
+  for(var i=0;i<GROWS.length;i++){ var rw=GROWS[i];
+    if(CURCOMP && GSRCIDX>=0 && (GSRCIDX<rw.length?rw[GSRCIDX]:"")!==CURCOMP) continue;
+    if(q){ if(rw.join("  ").toLowerCase().indexOf(q)<0) continue; }
+    rows.push(rw);
+  }
+  if(GSORTKEY>=0){ var k=GSORTKEY, dir=GSORTDIR; rows=rows.slice(0);
+    rows.sort(function(a,b){ var x=(k<a.length?a[k]:""), y=(k<b.length?b[k]:"");
+      if(isNumStr(x)&&isNumStr(y)) return (parseFloat(x)-parseFloat(y))*dir;
+      x=String(x).toLowerCase(); y=String(y).toLowerCase(); return x<y?-dir:(x>y?dir:0); });
+  }
+  $("statbar").innerHTML=stat(nf(GROWS.length),"rows")+stat(nf(GHEAD.length),"columns")+stat(nf(rows.length),"matching")+
+    '<span class="stat" style="min-width:240px"><span class="n" style="font-size:12px">'+esc(GSRC)+'</span><span class="l">source</span></span>';
+  var shown=rows.length>MAXROWS?MAXROWS:rows.length;
+  var h="<thead><tr>";
+  for(var c=0;c<GHEAD.length;c++){ var ar=(GSORTKEY===c)?(GSORTDIR>0?" ▲":" ▼"):""; h+='<th data-k="'+c+'">'+esc(GHEAD[c])+ar+'</th>'; }
+  h+="</tr></thead><tbody>";
+  for(var r=0;r<shown;r++){ var row=rows[r]; h+="<tr>";
+    for(var c2=0;c2<GHEAD.length;c2++){ var v=(c2<row.length?row[c2]:""); h+='<td class="mono" title="'+esc(v)+'">'+esc(trunc(v,140))+'</td>'; }
+    h+="</tr>"; }
+  h+="</tbody>"; $("tbl").innerHTML=h;
+  $("count").innerHTML=nf(rows.length)+" rows"+(shown<rows.length?(" (showing "+nf(shown)+")"):"");
+  var ths=$("tbl").getElementsByTagName("th");
+  for(var i2=0;i2<ths.length;i2++){ ths[i2].onclick=function(){ var kk=parseInt(this.getAttribute("data-k"),10);
+    if(GSORTKEY===kk) GSORTDIR*=-1; else { GSORTKEY=kk; GSORTDIR=1; } renderGeneric(); }; }
+  applyFreeze();
+  window.__genRows=rows;
+}
+function setMode(m){
+  MODE=m; var hb=(m==="hb");
+  showEl("hbCards",hb); showEl("lvlCats",hb); showEl("viewToggle",hb); showEl("hbFoot",hb); showEl("iocBtn",hb); showEl("noiseBtn",hb);
+  if(!hb){ showEl("iocWrap",false); showEl("noiseWrap",false); closeDetail(); }
+  $("ovTitle").innerHTML = hb ? "Overview &mdash; reflects active filters" : "Overview";
+  $("tableTitle").innerHTML = hb ? "Detections (chronological)" : "Records";
+  $("maxrowLbl").innerHTML = nf(MAXROWS);
+}
+
+/* ---------- export / copy ---------- */
+function cq(v){ v=(v==null)?"":String(v); return /[",\r\n]/.test(v)?('"'+v.replace(/"/g,'""')+'"'):v; }
+function nowStamp(){ var d=new Date(); function p(x){return (x<10?"0":"")+x;}
+  return d.getFullYear()+""+p(d.getMonth()+1)+p(d.getDate())+"_"+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds()); }
+function exportView(){
+  if(MODE==="generic"){ exportGeneric(); return; }
+  if(VIEW==="title"){ exportTitle(); return; }
+  var rows=window.__fullRows||[];
+  if(!rows.length){ setStatus("Nothing to export","err"); return; }
+  var head=["Timestamp_UTC","Level","RuleTitle","Computer","Channel","EventID","RecordID","Details","ExtraFieldInfo","RuleID","Score","IOCHits"];
+  var lines=[head.join(",")];
+  for(var i=0;i<rows.length;i++){ var r=rows[i];
+    lines.push([cq(r.ts),cq(LVLMETA[r.lkey].name),cq(r.title),cq(r.computer),cq(r.channel),cq(r.eid),cq(r.recordId),
+      cq(r.details),cq(r.extra),cq(r.ruleId),cq(r.score),cq(r.iocHits.join("; "))].join(",")); }
+  writeExport(lines, "detections");
+}
+function exportTitle(){
+  var groups=window.__titleFull||[];
+  if(!groups.length){ setStatus("Nothing to export","err"); return; }
+  var head=["RuleTitle","MaxLevel","Count","DistinctComputers","FirstSeen_UTC","LastSeen_UTC","IOCHitEvents"];
+  var lines=[head.join(",")];
+  for(var i=0;i<groups.length;i++){ var g=groups[i];
+    lines.push([cq(g.title),cq(LVLMETA[g.lkey].name),cq(g.count),cq(g.compN),cq(g.minTs),cq(g.maxTs),cq(g.ioc)].join(",")); }
+  writeExport(lines, "rules_by_title");
+}
+function exportGeneric(){
+  var rows=window.__genRows||[];
+  if(!GHEAD||!rows.length){ setStatus("Nothing to export","err"); return; }
+  var lines=[]; var hd=[]; for(var c=0;c<GHEAD.length;c++) hd.push(cq(GHEAD[c])); lines.push(hd.join(","));
+  for(var i=0;i<rows.length;i++){ var rw=rows[i]; var cells=[]; for(var c2=0;c2<GHEAD.length;c2++) cells.push(cq(c2<rw.length?rw[c2]:"")); lines.push(cells.join(",")); }
+  writeExport(lines, "filtered");
+}
+function writeExport(lines, tag){
+  var dir=LASTOUTDIR||$("outDir").value;
+  var path=dir+"\\"+tag+"_export_"+nowStamp()+".csv";
+  try{ writeUtf8(path, lines.join("\r\n")); setStatus("Exported "+nf(lines.length-1)+" rows → "+path,"ok"); appendLog("Exported: "+path); }
+  catch(e){ setStatus("Export failed: "+e.message,"err"); }
+}
+function copyNotes(){
+  if(MODE==="generic"){
+    var grows=(window.__genRows||[]).slice(0,500); if(!GHEAD||!grows.length){ setStatus("Nothing to copy","err"); return; }
+    var gout=[GHEAD.join("\t")]; for(var g=0;g<grows.length;g++) gout.push(grows[g].join("\t"));
+    try{ window.clipboardData.setData("Text", gout.join("\r\n")); setStatus("Copied "+grows.length+" rows (TSV)","ok"); }catch(eg){ setStatus("Copy failed: "+eg.message,"err"); }
+    return;
+  }
+  var out=[];
+  if(VIEW==="title"){
+    var groups=(window.__titleFull||[]).slice(0,500);
+    if(!groups.length){ setStatus("Nothing to copy","err"); return; }
+    for(var j=0;j<groups.length;j++){ var g=groups[j];
+      out.push(g.title+" | "+LVLMETA[g.lkey].name+" | x"+g.count+" | "+g.compN+" host(s) | "+g.minTs+" → "+g.maxTs+(g.ioc?(" | IOC:"+g.ioc):"")); }
+  } else {
+    var rows=(window.__fullRows||[]).slice(0,500);
+    if(!rows.length){ setStatus("Nothing to copy","err"); return; }
+    for(var i=0;i<rows.length;i++){ var r=rows[i];
+      out.push(r.ts+" | "+LVLMETA[r.lkey].name+" | "+r.title+" | "+r.computer+" | EID "+r.eid+(r.iocHits.length?(" | IOC:"+r.iocHits.join(",")):"")); }
+  }
+  try{ window.clipboardData.setData("Text", out.join("\r\n")); setStatus("Copied "+out.length+" lines to clipboard","ok"); }
+  catch(e){ setStatus("Copy failed: "+e.message,"err"); }
+}
+
+/* ---------- IOC / noise lists ---------- */
+function parseTerms(t){ var parts=String(t).split(/[\r\n,;]+/), out=[]; for(var i=0;i<parts.length;i++){ var s=trimStr(parts[i]).toLowerCase(); if(s) out.push(s); } return out; }
+function applyIocs(){
+  IOCS=parseTerms($("iocBox").value);
+  $("iocInfo").innerHTML=IOCS.length?(nf(IOCS.length)+" term(s) active"):"no terms";
+  if(MODE==="hb"&&ROWS.length){ rescoreAll(); render(); if(DETREC) renderDetailEvent(DETREC); }
+  setStatus(IOCS.length?("IOC list applied — "+IOCS.length+" term(s), detections rescored"):"IOC list cleared","ok");
+}
+function applyNoise(){
+  NOISE=parseTerms($("noiseBox").value);
+  SHOWNOISE=$("noiseShow").checked;
+  $("noiseInfo").innerHTML=NOISE.length?(nf(NOISE.length)+" term(s) "+(SHOWNOISE?"— showing suppressed":"— suppressing matches")):"no terms";
+  if(MODE==="hb"&&ROWS.length){ rescoreAll(); render(); }
+  setStatus(NOISE.length?("Noise list applied — "+NOISE.length+" term(s)"):"Noise list cleared","ok");
+}
+
+/* ---------- command-line invocation ----------
+   mshta.exe "Hayabusa-Wrapper.hta" "<inputOrCsv>" ["<outDir>"] [/auto] [/min:LEVEL] [/profile:NAME]
+     positional-1 : .csv → auto-load;  .evtx / directory → prefill (+process if /auto)
+     positional-2 : output dir
+     /auto        : process immediately (evtx input only) */
+function tokenizeCmdTail(){
+  var cl=""; try{ cl=hayabusaHta.commandLine+""; }catch(e){ return []; }
+  // drop everything up to and including the .hta" token
+  var m=cl.match(/\.hta"?/i);
+  var tail = m ? cl.substring(m.index+m[0].length) : cl;
+  var toks=[], i=0, n=tail.length, cur="", inq=false;
+  while(i<n){ var c=tail.charAt(i);
+    if(inq){ if(c==='"'){ inq=false; } else cur+=c; i++; continue; }
+    if(c==='"'){ inq=true; i++; continue; }
+    if(c===' '||c==='\t'){ if(cur!==""){ toks.push(cur); cur=""; } i++; continue; }
+    cur+=c; i++;
+  }
+  if(cur!=="") toks.push(cur);
+  return toks;
+}
+function parseCli(){
+  var toks=tokenizeCmdTail();
+  var cli={input:"", outDir:"", auto:false, min:"", profile:""};
+  for(var i=0;i<toks.length;i++){ var t=toks[i];
+    if(/^[\/\-]{1,2}auto$/i.test(t)){ cli.auto=true; continue; }
+    var mm=t.match(/^[\/\-]{1,2}min[:=](.+)$/i); if(mm){ cli.min=mm[1]; continue; }
+    var pm=t.match(/^[\/\-]{1,2}profile[:=](.+)$/i); if(pm){ cli.profile=pm[1]; continue; }
+    if(/^[\/\-]/.test(t)) continue;         // unknown flag → ignore
+    if(!cli.input) cli.input=t; else if(!cli.outDir) cli.outDir=t;
+  }
+  return cli;
+}
+function applyCli(cli){
+  if(!cli.input) return false;
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  if(cli.min){ try{ $("optMin").value=cli.min.toLowerCase(); }catch(e){} }
+  if(cli.profile){ try{ $("optProfile").value=cli.profile.toLowerCase(); }catch(e){} }
+  if(/\.csv$/i.test(cli.input) && fso.FileExists(cli.input)){
+    appendLog("CLI: loading CSV "+cli.input);
+    window.setTimeout(function(){ loadCsvFile(cli.input); }, 60);
+    return true;
+  }
+  if(fso.FolderExists(cli.input)){ $("inMode").value="d"; $("inPath").value=cli.input; }
+  else if(fso.FileExists(cli.input)){ $("inMode").value="f"; $("inPath").value=cli.input; }
+  else { setStatus("CLI input not found: "+cli.input,"err"); appendLog("CLI input not found: "+cli.input); return false; }
+  if(cli.outDir) $("outDir").value=cli.outDir;
+  if(cli.auto){
+    appendLog("CLI: /auto — processing "+cli.input);
+    window.setTimeout(function(){ processHb(); }, 200);
+  } else {
+    setStatus("CLI: input prefilled. Click 'Process → analyze' to run.","muted");
+  }
+  return true;
+}
+
+/* ---------- wiring ---------- */
+function init(){
+  try{ window.resizeTo(1360,920); }catch(e){}
+  $("appver").innerHTML="&middot; v"+APP_VERSION;
+  try{ document.title="Hayabusa Wrapper v"+APP_VERSION; }catch(e){}
+  $("maxrowLbl").innerHTML=nf(MAXROWS);
+  $("tblScroll").onscroll=applyFreeze;
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  $("inPath").value=LIVE_LOGS; $("inMode").value="d";
+  var expBase=htaFolder()||fso.GetSpecialFolder(2)+"";
+  var expDir=expBase+"\\Exported CSVs";
+  try{ if(!fso.FolderExists(expDir)) fso.CreateFolder(expDir); }catch(e){}
+  $("outDir").value=expDir;
+
+  // A+/A- scale ONLY the content area (#content), never the header — so the font buttons stay put and never
+  // slide off-screen (which is what happened when body-zoom widened the header past the window edge).
+  var zoom=0.9, zContent=$("content");
+  function applyZoom(){ zContent.style.zoom=zoom; var p=Math.round(zoom*100)+"%";
+    $("fup").title="Larger text ("+p+")"; $("fdown").title="Smaller text ("+p+")"; }
+  applyZoom();
+  $("fup").onclick=function(){ zoom=Math.min(zoom+0.15,2.5); applyZoom(); };
+  $("fdown").onclick=function(){ zoom=Math.max(zoom-0.15,0.6); applyZoom(); };
+
+  $("verBtn").onclick=checkVersion;
+  $("updBtn").onclick=updateRules;
+  $("getBtn").onclick=downloadHayabusa;
+  $("openDirBtn").onclick=openDir;
+  $("procBtn").onclick=processHb;
+  $("liveBtn").onclick=function(){
+    $("inMode").value="d"; $("inPath").value=LIVE_LOGS;
+    if(!canListFolder(LIVE_LOGS)) setStatus("Heads up: "+LIVE_LOGS+" is not readable — this app is NOT elevated. Relaunch as administrator, or point at a collected copy.","err");
+    else setStatus("Live event-log folder readable — click 'Process → analyze' to scan this machine.","ok");
+  };
+  $("loadSelBtn").onclick=function(){ var v=$("producedSel").value; if(!v) return;
+    setStatus("Loading "+v,"muted"); window.setTimeout(function(){ loadCsvFile(v); },50); };
+  $("browseBtn").onclick=function(){
+    if($("inMode").value==="d"){
+      try{ var sha=new ActiveXObject("Shell.Application");
+        var fld=sha.BrowseForFolder(0,"Select the event-log folder to process (collection trees are fine — the scan recurses).",0x51);
+        if(fld){ var p=""; try{ p=fld.Self.Path+""; }catch(e2){}
+          if(/^[a-z]:\\|^\\\\/i.test(p)) $("inPath").value=p;
+          else if(p) setStatus("That selection has no filesystem path — pick a real folder.","err"); }
+      }catch(e){ $("inPick").click(); }
+    } else { $("inPick").click(); }
+  };
+  $("inPick").onchange=function(){ if(this.value){ var v=this.value;
+    if($("inMode").value==="d"){ var i=v.lastIndexOf("\\"); if(i>0) v=v.substring(0,i); }
+    $("inPath").value=v; } };
+  $("loadBtn").onclick=function(){ $("csvPick").click(); };
+  $("csvPick").onchange=function(){ if(this.value){ setStatus("Loading "+this.value,"muted"); loadCsvFile(this.value); } };
+  $("logToggle").onclick=function(){ var l=$("log");
+    if(l.style.display==="none"||!l.style.display){
+      if(!trimStr(l.innerHTML.replace(/<[^>]*>/g,""))){ l.innerHTML='<span class="muted">(empty — Hayabusa output appears here after a run. A console window shows live progress while it runs.)</span>'; l.setAttribute("data-ph","1"); }
+      l.style.display="block"; this.innerHTML="Hide log";
+    } else { l.style.display="none"; this.innerHTML="Show log"; } };
+
+  var lvlBtns=$("lvlCats").getElementsByTagName("button");
+  for(var i=0;i<lvlBtns.length;i++){ if(lvlBtns[i].getAttribute("data-lvl")){ lvlBtns[i].onclick=function(){
+    CURLVL=this.getAttribute("data-lvl"); highlightLvl(); render(); }; } }
+
+  $("q").onkeyup=function(){ if(qTimer) window.clearTimeout(qTimer);
+    qTimer=window.setTimeout(function(){ QUERY=trimStr($("q").value).toLowerCase(); render(); },150); };
+  $("dfrom").onchange=function(){ DFROM=dayNum(this.value); render(); };
+  $("dto").onchange=function(){ DTO=dayNum(this.value); render(); };
+  $("compSel").onchange=function(){ CURCOMP=this.value; render(); };
+  $("clearBtn").onclick=function(){ $("q").value="";$("dfrom").value="";$("dto").value="";$("compSel").value="";
+    QUERY="";DFROM=0;DTO=0;CURCOMP="";CURLVL="all";TITLEONLY=""; renderTitleFilterChip(); highlightLvl(); render(); };
+  $("exportBtn").onclick=exportView;
+  $("copyBtn").onclick=copyNotes;
+
+  $("vChrono").onclick=function(){ setView("chrono"); };
+  $("vSev").onclick=function(){ setView("sev"); };
+  $("vTitle").onclick=function(){ setView("title"); };
+  $("iocBtn").onclick=function(){ var w=$("iocWrap"); showEl("iocWrap", /\bhide\b/.test(w.className)); };
+  $("iocApply").onclick=applyIocs;
+  $("iocLoad").onclick=function(){ $("iocPick").click(); };
+  $("iocPick").onchange=function(){ if(this.value){ try{ $("iocBox").value=readUtf8(this.value); applyIocs(); }catch(e){ setStatus("Could not read IOC file: "+e.message,"err"); } } };
+  $("noiseBtn").onclick=function(){ var w=$("noiseWrap"); showEl("noiseWrap", /\bhide\b/.test(w.className)); };
+  $("noiseApply").onclick=applyNoise;
+  $("noiseShow").onclick=function(){ SHOWNOISE=this.checked; if(MODE==="hb"&&ROWS.length){ render(); } };
+  $("noiseLoad").onclick=function(){ $("noisePick").click(); };
+  $("noisePick").onchange=function(){ if(this.value){ try{ $("noiseBox").value=readUtf8(this.value); applyNoise(); }catch(e){ setStatus("Could not read noise file: "+e.message,"err"); } } };
+  $("detClose").onclick=closeDetail;
+  $("detCopy").onclick=copyDetail;
+
+  /* click delegation: data-q → search; title row → title detail; group header → collapse; detection row → detail */
+  document.onclick=function(e){ e=e||window.event; var t=e.target||e.srcElement;
+    var q=t&&t.getAttribute?t.getAttribute("data-q"):null;
+    if(q){ $("q").value=q; QUERY=q.toLowerCase(); render(); return; }
+    if(MODE!=="hb") return;
+    var n=t;
+    while(n && n.tagName!=="TR"){ n=n.parentNode; if(n&&n.tagName==="TABLE"){ n=null; break; } }
+    if(!n||!n.getAttribute) return;
+    var grp=n.getAttribute("data-grp");
+    if(grp){ GOPEN[grp]=GOPEN[grp]?0:1; renderSev(); return; }
+    var ti=n.getAttribute("data-t");
+    if(ti!=null && ti!==""){ var gi=parseInt(ti,10); var gs=window.__titleRows||[]; if(gi>=0&&gi<gs.length) renderDetailTitle(gs[gi]); return; }
+    var di=n.getAttribute("data-i");
+    if(di!=null && di!==""){ var ix=parseInt(di,10); var rows=window.__viewRows||[];
+      if(ix>=0&&ix<rows.length){ renderDetailEvent(rows[ix]);
+        var trs=$("tbl").getElementsByTagName("tr");
+        for(var z=0;z<trs.length;z++){ var zi=trs[z].getAttribute("data-i");
+          if(zi!=null&&zi!==""){ var zr=rows[parseInt(zi,10)]; var base=zr?rowClass(zr):"";
+            trs[z].className=(parseInt(zi,10)===ix)?((base?base+" ":"")+"sel"):base; } } }
+    }
+  };
+
+  // command-line first (so an artifact-finder can drive it); only prompt to install if no CLI input
+  var cli=parseCli();
+  var hadCli=false;
+  try{ hadCli=applyCli(cli); }catch(e){ appendLog("CLI parse error: "+e.message); }
+  evaluateTooling(!hadCli);
+  if(isNetworkPath(htaFolder()))
+    appendLog("Heads-up: running from a network location ("+htaFolder()+"). Zone policy may block the UTF-8 reader; the app falls back to ANSI IO automatically. For full fidelity copy the folder to a local path.");
+}
+function isNetworkPath(p){
+  try{ if(/^\\\\/.test(p)) return true;
+    var fso=new ActiveXObject("Scripting.FileSystemObject");
+    return fso.GetDrive(fso.GetDriveName(p)).DriveType===3;
+  }catch(e){ return false; }
+}
+function dayNum(s){ if(!s) return 0; var m=String(s).match(/(\d{4})-(\d{1,2})-(\d{1,2})/); if(!m) return 0;
+  function p(x){ x=String(x); return x.length<2?("0"+x):x; }
+  return Number(m[1]+p(m[2])+p(m[3])); }
+
+window.onload=init;
+</script>
+</body>
+</html>
