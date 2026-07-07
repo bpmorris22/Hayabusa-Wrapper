@@ -270,7 +270,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.6.0";
+var APP_VERSION = "0.7.0";
 var KNOWN_LATEST = "3.3.0";                                                        // baseline as of 2026-07-06
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -819,8 +819,10 @@ function writeRunInfo(outdir, input, freshFiles){
     var d=new Date(); function p2(x){ return (x<10?"0":"")+x; }
     var iso=d.getFullYear()+"-"+p2(d.getMonth()+1)+"-"+p2(d.getDate())+"T"+p2(d.getHours())+":"+p2(d.getMinutes())+":"+p2(d.getSeconds());
     var names=[]; for(var i=0;i<freshFiles.length && i<50;i++) names.push(freshFiles[i].name||String(freshFiles[i]));
-    arr.push({app:APP_NAME, appVersion:APP_VERSION, host:sanitHost($("hostName").value),
-              input:String(input||""), finishedUtc:iso, files:names});
+    var ent={app:APP_NAME, appVersion:APP_VERSION, host:sanitHost($("hostName").value),
+              input:String(input||""), finishedUtc:iso, files:names};
+    if(CASE_FROM) ent.winFrom=CASE_FROM; if(CASE_TO) ent.winTo=CASE_TO;   // case window recorded (Finder-observable), never scored
+    arr.push(ent);
     writeUtf8(p, JSON.stringify(arr,null,2));
     RUNINFO_LAST={path:p, iso:iso};
   }catch(e){}
@@ -1640,7 +1642,7 @@ function applyNoise(){
 }
 
 /* ---------- command-line invocation ----------
-   mshta.exe "Hayabusa-Wrapper.hta" "<inputOrCsv>" ["<outDir>"] [/auto] [/min:LEVEL] [/profile:NAME]
+   mshta.exe "Hayabusa-Wrapper.hta" "<inputOrCsv>" ["<outDir>"] [/auto] [/min:LEVEL] [/profile:NAME] [/from:yyyy-MM-dd] [/to:yyyy-MM-dd]
      positional-1 : .csv → auto-load;  .evtx / directory → prefill (+process if /auto)
      positional-2 : output dir
      /auto        : process immediately (evtx input only) */
@@ -1685,13 +1687,25 @@ function tokenizeCmdTail(){
   if(cur!=="") toks.push(cur);
   return toks;
 }
+/* ---------- case window (family, 2026-07-07) ----------
+   /from:/to: (UTC calendar dates) prefill this app's existing date filter before any /auto run,
+   and are recorded in runinfo.json. FILTER ONLY — the window never touches scoring (attackers
+   stage outside the known window; the operator can always widen the filter inside the tool). */
+var CASE_FROM="", CASE_TO="";
+function applyCaseWindow(from,to){
+  if(from){ if(/^\d{4}-\d{2}-\d{2}$/.test(from)){ CASE_FROM=from; try{ $("dfrom").value=from; DFROM=dayNum(from); }catch(e){} } else appendLog("CLI: ignoring invalid /from value '"+from+"'"); }
+  if(to){ if(/^\d{4}-\d{2}-\d{2}$/.test(to)){ CASE_TO=to; try{ $("dto").value=to; DTO=dayNum(to); }catch(e2){} } else appendLog("CLI: ignoring invalid /to value '"+to+"'"); }
+  if(CASE_FROM||CASE_TO) appendLog("CLI: case window "+(CASE_FROM||"…")+" .. "+(CASE_TO||"…")+" — prefilled the date filter (filter only, never scored)");
+}
 function parseCli(){
   var toks=tokenizeCmdTail();
-  var cli={input:"", outDir:"", auto:false, min:"", profile:""};
+  var cli={input:"", outDir:"", auto:false, min:"", profile:"", from:"", to:""};
   for(var i=0;i<toks.length;i++){ var t=toks[i];
     if(/^[\/\-]{1,2}auto$/i.test(t)){ cli.auto=true; continue; }
     var mm=t.match(/^[\/\-]{1,2}min[:=](.+)$/i); if(mm){ cli.min=mm[1]; continue; }
     var pm=t.match(/^[\/\-]{1,2}profile[:=](.+)$/i); if(pm){ cli.profile=pm[1]; continue; }
+    var fm=t.match(/^[\/\-]{1,2}from[:=](\d{4}-\d{2}-\d{2})$/i); if(fm){ cli.from=fm[1]; continue; }
+    var tm=t.match(/^[\/\-]{1,2}to[:=](\d{4}-\d{2}-\d{2})$/i); if(tm){ cli.to=tm[1]; continue; }
     if(/^[\/\-]/.test(t)) continue;         // unknown flag → ignore
     if(!cli.input) cli.input=t; else if(!cli.outDir) cli.outDir=t;
   }
@@ -1700,6 +1714,7 @@ function parseCli(){
 function applyCli(cli){
   if(!cli.input) return false;
   var fso=new ActiveXObject("Scripting.FileSystemObject");
+  applyCaseWindow(cli.from, cli.to);   // case window (UTC): prefill the date filter BEFORE any /auto run — filter only, never scored
   if(cli.min){ try{ $("optMin").value=cli.min.toLowerCase(); }catch(e){} }
   if(cli.profile){ try{ $("optProfile").value=cli.profile.toLowerCase(); }catch(e){} }
   if(/\.csv$/i.test(cli.input) && fso.FileExists(cli.input)){
@@ -1925,10 +1940,11 @@ window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }
       <li><b>Resizable columns</b> — drag a column-header edge to resize (widths are remembered per view); double-click the edge to reset all widths.</li>
     </ul>
     <h3>Command line</h3>
-    <p><code>mshta "Hayabusa-Wrapper.hta" "&lt;inputOrCsv&gt;" ["&lt;outDir&gt;"] [/auto]</code></p>
+    <p><code>mshta "Hayabusa-Wrapper.hta" "&lt;inputOrCsv&gt;" ["&lt;outDir&gt;"] [/auto] [/from:yyyy-MM-dd] [/to:yyyy-MM-dd]</code></p>
     <ul>
       <li><code>&lt;input&gt;</code> — a <code>.csv</code> (auto-loads) or an <code>.evtx</code> file / directory (prefilled; processed with <code>/auto</code>).</li>
       <li><code>&lt;outDir&gt;</code> — CSV output directory (optional). &nbsp; <code>/auto</code> — process immediately.</li>
+      <li><code>/from:yyyy-MM-dd</code> <code>/to:yyyy-MM-dd</code> — case window (UTC, inclusive): prefills the date filter and is recorded in runinfo; never affects scoring.</li>
       <li><b>Target hostname</b> is required before processing — it names the output folder <code>_Processed\&lt;host&gt;\Hayabusa</code> next to this app (family convention shared with the Artifact-Finder). It is guessed from <code>Collection-&lt;host&gt;-…</code> paths, a passed <code>_Processed\&lt;host&gt;\</code> outDir, or this machine's name for live paths — overwrite the guess if it's wrong.</li>
       <li><b>Shared IOC list</b>: an <code>IOC.txt</code> next to this app (one term per line, <code>#</code> comments) is auto-merged into the IOC box at launch — one list covers the whole toolkit. Terms you paste locally are kept.</li>
       <li>After every successful run a <code>runinfo.json</code> provenance entry (app, host, input path, files) is appended in the output folder, including a <b>triage summary</b> (detections, crit/high/med/low counts, top rules) — the Artifact-Finder shows these per host in its inventory, even for runs done outside the finder.</li>
