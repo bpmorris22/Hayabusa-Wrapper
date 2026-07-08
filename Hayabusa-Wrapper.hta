@@ -282,7 +282,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.8.0";
+var APP_VERSION = "0.8.1";
 var KNOWN_LATEST = "3.10.0";                                                       // offline-fallback baseline as of 2026-07-08
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -1042,16 +1042,25 @@ function resolveTle(){
   var c=["C:\\Program Files\\TimelineExplorer\\TimelineExplorer.exe",
          "C:\\Tools\\TimelineExplorer\\TimelineExplorer.exe",
          "C:\\ZimmermanTools\\TimelineExplorer\\TimelineExplorer.exe",
+         "C:\\Tools\\ZimmermanTools\\TimelineExplorer\\TimelineExplorer.exe",
          "C:\\Program Files (x86)\\TimelineExplorer\\TimelineExplorer.exe"];
   for(var i=0;i<c.length;i++){ if(fileExists(c[i])) return c[i]; }
+  // ZimmermanTools .NET layout: <root>\Net*\TimelineExplorer\TimelineExplorer.exe (Net6 / Net9 / future Net10)
+  var roots=["C:\\ZimmermanTools","C:\\Tools\\ZimmermanTools"];
+  try{ var fso=new ActiveXObject("Scripting.FileSystemObject");
+    for(var r=0;r<roots.length;r++){ if(!fso.FolderExists(roots[r])) continue;
+      var sub=new Enumerator(fso.GetFolder(roots[r]).SubFolders);
+      for(; !sub.atEnd(); sub.moveNext()){ var f=sub.item();
+        if(/^net/i.test(f.Name+"")){ var cand=f.Path+"\\TimelineExplorer\\TimelineExplorer.exe";
+          if(fileExists(cand)) return cand; } } } }catch(e){}
   try{ var sh=new ActiveXObject("WScript.Shell"); var dl=sh.SpecialFolders("Desktop")+"\\TimelineExplorer.lnk";
-    if(fileExists(dl)){ var lk=sh.CreateShortcut(dl); if(lk.TargetPath && fileExists(lk.TargetPath+"")) return lk.TargetPath+""; } }catch(e){}
+    if(fileExists(dl)){ var lk=sh.CreateShortcut(dl); if(lk.TargetPath && fileExists(lk.TargetPath+"")) return lk.TargetPath+""; } }catch(e2){}
   return "";
 }
 function openInTle(){
   if(!CURRENT_CSV || !fileExists(CURRENT_CSV)){ setStatus("No loaded CSV to open.","err"); return; }
   var tle=resolveTle();
-  if(!tle){ setStatus("Timeline Explorer not found (Program Files / C:\\Tools / ZimmermanTools). Open the CSV manually: "+CURRENT_CSV,"err"); return; }
+  if(!tle){ setStatus("Timeline Explorer not found (Program Files / C:\\Tools / C:\\ZimmermanTools\\Net* / C:\\Tools\\ZimmermanTools\\Net*). Open the CSV manually: "+CURRENT_CSV,"err"); return; }
   try{ new ActiveXObject("WScript.Shell").Run('"'+tle+'" "'+CURRENT_CSV+'"',1,false); setStatus("Opening in Timeline Explorer…","ok"); }
   catch(e){ setStatus("Could not launch Timeline Explorer: "+e.message,"err"); }
 }
