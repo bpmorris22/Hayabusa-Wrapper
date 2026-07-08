@@ -270,8 +270,8 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.7.0";
-var KNOWN_LATEST = "3.3.0";                                                        // baseline as of 2026-07-06
+var APP_VERSION = "0.7.1";
+var KNOWN_LATEST = "3.10.0";                                                       // offline-fallback baseline as of 2026-07-08
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
 var LIVE_LOGS = "C:\\Windows\\System32\\winevt\\Logs";
@@ -817,7 +817,9 @@ function writeRunInfo(outdir, input, freshFiles){
     var arr=[];
     try{ if(fileExists(p)){ var old=JSON.parse(readUtf8(p)); if(old && old.length!=null) arr=old; } }catch(e0){}
     var d=new Date(); function p2(x){ return (x<10?"0":"")+x; }
-    var iso=d.getFullYear()+"-"+p2(d.getMonth()+1)+"-"+p2(d.getDate())+"T"+p2(d.getHours())+":"+p2(d.getMinutes())+":"+p2(d.getSeconds());
+    // QA F3: field is named finishedUtc — use UTC getters (was local; 10h skew on UTC+10 analysis boxes).
+    // Same string shape as before (no Z appended) so the Artifact-Finder's parsing is unaffected.
+    var iso=d.getUTCFullYear()+"-"+p2(d.getUTCMonth()+1)+"-"+p2(d.getUTCDate())+"T"+p2(d.getUTCHours())+":"+p2(d.getUTCMinutes())+":"+p2(d.getUTCSeconds());
     var names=[]; for(var i=0;i<freshFiles.length && i<50;i++) names.push(freshFiles[i].name||String(freshFiles[i]));
     var ent={app:APP_NAME, appVersion:APP_VERSION, host:sanitHost($("hostName").value),
               input:String(input||""), finishedUtc:iso, files:names};
@@ -985,6 +987,9 @@ function parseCSV(text){
 /* ---------- ingest dispatch ---------- */
 function loadCsvFile(path){
   try{
+    // QA F6: a 0-byte CSV is a legitimate 0-detection Hayabusa run — say so instead of "unparseable"
+    var fsz=fileSize(path);
+    if(fsz>=0 && fsz<3){ setStatus("This CSV is empty — a 0-detection Hayabusa run (nothing matched). Nothing to display.","ok"); return; }
     setStatus("Reading "+baseName(path)+"…","muted");
     var text=readUtf8(path);
     var raw=parseCSV(text);
@@ -1043,7 +1048,11 @@ function ingestHayabusa(raw, idx, head, srcLabel){
   $("results").className="";
   var span=timeSpanLabel(ROWS);
   $("srcpill").innerHTML=nf(ROWS.length)+" detections &middot; "+esc(srcLabel);
-  QUERY=""; $("q").value=""; DFROM=0; DTO=0; $("dfrom").value=""; $("dto").value="";
+  QUERY=""; $("q").value="";
+  // QA F1: the /from:/to: case window must SURVIVE ingest — restore it instead of clearing
+  // (both CLI paths ingest after applyCaseWindow prefilled the filter; a plain reset erased it)
+  DFROM=CASE_FROM?dayNum(CASE_FROM):0; DTO=CASE_TO?dayNum(CASE_TO):0;
+  $("dfrom").value=CASE_FROM||""; $("dto").value=CASE_TO||"";
   CURLVL="all"; TITLEONLY=""; renderTitleFilterChip(); highlightLvl();
   SORTKEY=0; SORTDIR=-1; TSORTKEY=-1;
   setView("chrono", true);
@@ -1596,8 +1605,23 @@ function exportGeneric(){
   for(var i=0;i<rows.length;i++){ var rw=rows[i]; var cells=[]; for(var c2=0;c2<GHEAD.length;c2++) cells.push(cq(c2<rw.length?rw[c2]:"")); lines.push(cells.join(",")); }
   writeExport(lines, "filtered");
 }
+/* QA F4: ADODB.SaveToFile cannot create directories — a load-CSV-only session points at a
+   _Processed\<host>\Hayabusa folder no run has created yet, so exports failed. Create the chain. */
+function ensureFolder(p){
+  try{
+    var fso=new ActiveXObject("Scripting.FileSystemObject");
+    p=String(p).replace(/[\\\/]+$/,"");
+    if(!p || fso.FolderExists(p)) return true;
+    var parent=parentDir(p);
+    if(parent && parent!==p && !fso.FolderExists(parent)) ensureFolder(parent);
+    fso.CreateFolder(p);
+    return true;
+  }catch(e){ return false; }
+}
 function writeExport(lines, tag){
   var dir=LASTOUTDIR||$("outDir").value;
+  if(!dir){ setStatus("No output directory set","err"); return; }
+  ensureFolder(dir);
   var path=dir+"\\"+tag+"_export_"+nowStamp()+".csv";
   try{ writeUtf8(path, lines.join("\r\n")); setStatus("Exported "+nf(lines.length-1)+" rows → "+path,"ok"); appendLog("Exported: "+path); }
   catch(e){ setStatus("Export failed: "+e.message,"err"); }
@@ -1749,8 +1773,11 @@ function init(){
   // default output follows the target hostname: _Processed\<host>\Hayabusa next to the .hta
   // (the default input is the live event-log folder, so the first guess is this computer's name)
   hostGuessFrom(LIVE_LOGS);
+  // QA F5: onchange too — right-click paste never fires keyup, letting a later guess overwrite the pasted value
   $("hostName").onkeyup=function(){ HOST_TOUCHED=true; syncOutDir(); };
+  $("hostName").onchange=function(){ HOST_TOUCHED=true; syncOutDir(); };
   $("outDir").onkeyup=function(){ OUT_TOUCHED=true; };
+  $("outDir").onchange=function(){ OUT_TOUCHED=true; };
   loadToolkitIoc();   // shared toolkit IOC.txt — merged before any CLI /auto run
 
   // A+/A- scale ONLY the content area (#content), never the header — so the font buttons stay put and never

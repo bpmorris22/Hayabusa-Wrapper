@@ -10,3 +10,9 @@ logs/
 mock-*.html
 defender-exclusion-added.txt
 *.colw.txt
+# runtime case data the toolkit conventions create NEXT TO the .hta (QA F2)
+_Processed/
+IOC.txt
+IOC.csv
+runinfo.json
+*.settings.json
