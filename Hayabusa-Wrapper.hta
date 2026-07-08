@@ -175,7 +175,7 @@
     <button class="btn" id="browseBtn">Browse&hellip;</button>
     <button class="btn" id="liveBtn" title="Point at this machine's live event logs (C:\Windows\System32\winevt\Logs). Reading them needs an ELEVATED run.">Scan this machine</button>
     <label class="fld" title="Required before processing. Guessed from the input path (Collection-<host>-… segments, or this machine for live paths) — overwrite it if the guess is wrong.">Target hostname (required) &mdash; names the output folder _Processed\&lt;host&gt;\Hayabusa next to this app</label>
-    <input class="txt" id="hostName" value="" style="width:260px" placeholder="e.g. LT-2738RQ3">
+    <input class="txt" id="hostName" value="" style="width:260px" placeholder="e.g. WORKSTATION-01">
     <label class="fld">CSV output directory</label>
     <input class="txt wide" id="outDir" value="">
     <button class="btn" id="openDirBtn">Open folder</button>
@@ -283,7 +283,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.8.2";
+var APP_VERSION = "0.8.3";
 var KNOWN_LATEST = "3.10.0";                                                       // offline-fallback baseline as of 2026-07-08
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
