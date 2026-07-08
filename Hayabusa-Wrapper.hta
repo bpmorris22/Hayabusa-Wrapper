@@ -162,6 +162,12 @@
         <select id="optProfile" title="Hayabusa output profile (columns). 'standard' matches this tool's rich view; others still load (extra columns show in the detail pane).">
           <option value="standard" selected>standard</option><option value="minimal">minimal</option>
           <option value="verbose">verbose</option><option value="super-verbose">super-verbose</option></select></label>
+      &nbsp;<label style="font-size:12px" title="-H: also write Hayabusa's own HTML summary report next to the CSV (opens in a browser — a self-contained client-friendly artifact).">
+        <input type="checkbox" id="optHtml"> HTML report</label>
+      &nbsp;<label style="font-size:12px" title="--exclude-status deprecated,unsupported: skip rules Hayabusa marks deprecated or unsupported (a little less noise).">
+        <input type="checkbox" id="optExclDep"> exclude deprecated</label>
+      &nbsp;<label style="font-size:12px" title="-P: scan with only Hayabusa's 'proven' rules — much faster and far fewer detections. Good for a quick first pass on a huge tree; NOT a thorough review.">
+        <input type="checkbox" id="optProven"> proven only (fast)</label>
     </label>
     <input class="txt wide" id="inPath" value="">
     <input type="file" id="inPick" style="display:none">
@@ -181,7 +187,12 @@
       <button class="btn" id="loadBtn" title="Browse to a Hayabusa csv-timeline CSV produced earlier (e.g. in an Exported CSVs folder) and load it straight into the triage views — no need to re-process the raw .evtx.">Load processed CSV&hellip;</button>
       <input type="file" id="csvPick" style="display:none">
       <span class="sep"></span>
+      <button class="btn" id="logonBtn" title="Run 'hayabusa logon-summary' on the input and load the result into the grid — great for BEC / lateral-movement triage.">Logon summary</button>
+      <button class="btn" id="eidBtn" title="Run 'hayabusa eid-metrics' on the input and load the result — per-Event-ID counts across the logs.">EID metrics</button>
+      <span class="sep"></span>
       <button class="btn" id="logToggle">Show log</button>
+      <button class="btn hide" id="htmlBtn" title="Open the Hayabusa HTML report produced by the last run">Open HTML report</button>
+      <button class="btn hide" id="tleBtn" title="Open the currently-loaded CSV in Eric Zimmerman's Timeline Explorer">Open in Timeline Explorer</button>
       <span class="muted" id="status" style="margin-left:8px"></span>
     </div>
     <div style="margin-top:8px" id="producedRow" class="hide">
@@ -211,6 +222,7 @@
         <button class="btn on" id="vChrono" title="Flat chronological — every detection, one row, newest first">Chronological</button>
         <button class="btn" id="vSev" title="Grouped by severity: Critical → High → Medium → Low → Informational">By severity</button>
         <button class="btn" id="vTitle" title="Aggregated by rule title: one row per rule with count, hosts, first/last seen">By rule title</button>
+        <button class="btn hide" id="vTactic" title="Aggregated by MITRE ATT&amp;CK tactic (needs the verbose profile — MitreTactics column). A detection can appear under several tactics.">By ATT&amp;CK tactic</button>
       </div>
       <div class="row hide" style="margin-bottom:8px" id="lvlCats">
         <button class="btn on" data-lvl="all">All</button>
@@ -270,7 +282,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.7.1";
+var APP_VERSION = "0.8.0";
 var KNOWN_LATEST = "3.10.0";                                                       // offline-fallback baseline as of 2026-07-08
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -305,6 +317,12 @@ var PRODUCED = [];
 var GOPEN = {crit:1,high:1,med:1,low:0,info:0};   // severity-group collapse state
 var COLW = {};                       // per-view column px widths once the user resizes (keys: chrono|sev|title|generic; persisted in a sidecar file)
 var DRAG = null;                     // active column-drag state
+var HAS_MITRE = false;               // loaded CSV carries a MitreTactics/MitreTags column (verbose profiles)
+var TACTICONLY = "";                 // exact-tactic drill-down filter (like TITLEONLY)
+var CURRENT_CSV = "";                // path of the currently-loaded CSV (Open in Timeline Explorer)
+var LAST_HTML = "";                  // Hayabusa -H HTML report produced by the last run
+var DETIDX = -1;                     // index into window.__viewRows of the detection open in the detail pane
+var AUTORUN = false;                 // a CLI /auto run is in flight (suppresses the Defender modal mid-run)
 
 /* ---------- level metadata ---------- */
 var LVLKEYS = ["crit","high","med","low","info"];
@@ -352,6 +370,14 @@ function splitSubs(raw){
   if(s==="" || s==="-") return [];
   var parts=s.split(/\s*Â?¦\s*/);
   var out=[]; for(var i=0;i<parts.length;i++){ var p=trimStr(parts[i]); if(p!=="") out.push(p); }
+  return out;
+}
+/* MITRE ATT&CK tactics from the verbose-profile MitreTactics (or MitreTags) column. Deduped, order kept.
+   Split on ¦ (+ mojibake), comma, semicolon, pipe — tactic names don't contain those. */
+function parseTactics(raw){
+  raw=trimStr(String(raw||"")); if(raw==="" || raw==="-") return [];
+  var parts=raw.split(/\s*(?:Â?¦|[,;|])\s*/), out=[], seen={};
+  for(var i=0;i<parts.length;i++){ var p=trimStr(parts[i]); if(p!==""){ var lk=p.toLowerCase(); if(!seen[lk]){ seen[lk]=1; out.push(p); } } }
   return out;
 }
 
@@ -501,15 +527,19 @@ function checkDeps(){
 function verTuple(v){ var p=String(v).split("."); var a=[]; for(var i=0;i<p.length;i++) a.push(parseInt(p[i],10)||0); return a; }
 function verCmp(a,b){ a=verTuple(a); b=verTuple(b); var n=Math.max(a.length,b.length);
   for(var i=0;i<n;i++){ var x=a[i]||0,y=b[i]||0; if(x!==y) return x<y?-1:1; } return 0; }
+/* QA F10: async — a synchronous GET froze startup for several seconds on offline/proxied boxes.
+   Fires in the background and re-renders the version pill when the answer arrives. */
 function fetchLatest(){
   LATEST_VER=KNOWN_LATEST; WEB_OK=false;
   try{
-    var x=new ActiveXObject("MSXML2.ServerXMLHTTP.6.0");
-    x.setTimeouts(2000,3000,4000,4000);
-    x.open("GET", HB_API_LATEST, false);
-    x.setRequestHeader("User-Agent","Hayabusa-Wrapper");
+    var x=new ActiveXObject("MSXML2.XMLHTTP.6.0");
+    x.open("GET", HB_API_LATEST, true);
+    try{ x.setRequestHeader("User-Agent","Hayabusa-Wrapper"); }catch(eh){}
+    x.onreadystatechange=function(){ if(x.readyState!==4) return;
+      try{ if(x.status===200){ WEB_OK=true; var t=x.responseText+""; var m=t.match(/"tag_name"\s*:\s*"v?([0-9.]+)"/i); if(m) LATEST_VER=m[1]; } }catch(e){}
+      updateVerPill();
+    };
     x.send();
-    if(x.status===200){ WEB_OK=true; var t=x.responseText+""; var m=t.match(/"tag_name"\s*:\s*"v?([0-9.]+)"/i); if(m) LATEST_VER=m[1]; }
   }catch(e){ WEB_OK=false; }
   return LATEST_VER;
 }
@@ -653,6 +683,7 @@ function pathCovered(dirL, exclL){
 function defExclMarker(){ return EXE_DIR+"\\defender-exclusion-added.txt"; }
 function checkDefenderExclusion(promptIfMissing, doneCb){
   if(!EXE_DIR) return;
+  if(AUTORUN) promptIfMissing=false;   // QA F7: during a CLI /auto run, log-only — never a modal mid-run
   if(promptIfMissing && DEFEXCL_DIR===EXE_DIR) return;   // one auto-prompt per dir per session
   DEFEXCL_DIR=EXE_DIR;
   var fso=new ActiveXObject("Scripting.FileSystemObject");
@@ -747,6 +778,10 @@ function buildTimelineCmd(inp, inmode, csvOut){
   if($("optQuiet").checked) extra+=" -q";
   var mn=$("optMin").value; if(mn && mn!=="informational") extra+=" -m "+mn;
   var pf=$("optProfile").value; if(pf && pf!=="standard") extra+=" -p "+pf;
+  if($("optExclDep") && $("optExclDep").checked) extra+=" --exclude-status deprecated,unsupported";
+  if($("optProven") && $("optProven").checked) extra+=" -P";
+  LAST_HTML="";
+  if($("optHtml") && $("optHtml").checked){ var htmlOut=String(csvOut).replace(/\.csv$/i,".html"); LAST_HTML=htmlOut; extra+=' -H "'+batEsc(htmlOut)+'"'; }
   return '"'+batEsc(EXE)+'" csv-timeline '+flag+' "'+batEsc(inp)+'" -o "'+batEsc(csvOut)+'"'+extra;
 }
 /* ---------- target hostname + _Processed output convention (family, 2026-07-06) ----------
@@ -923,6 +958,7 @@ function processHbDone(log,outdir,csvOut){
     try{ $("producedSel").value=csvOut; }catch(e){}
     setStatus("Timeline produced: "+baseName(csvOut)+" — loading…","ok");
     loadCsvFile(csvOut);
+    if(LAST_HTML && fileExists(LAST_HTML)){ showEl("htmlBtn",true); appendLog("HTML report saved: "+LAST_HTML); } else showEl("htmlBtn",false);
     patchRunInfoSummary(buildRunSummary());   // rows are ingested now — add the severity headline to the runinfo entry
     return;
   }
@@ -945,17 +981,85 @@ function listCsvFiles(dir){
   out.sort(function(a,b){ return a.name<b.name?1:(a.name>b.name?-1:0); });
   return out;
 }
+function csvNameSet(dir){ var o={}, l=listCsvFiles(dir); for(var i=0;i<l.length;i++) o[l[i].name]=true; return o; }
+/* enh: run a Hayabusa summary subcommand (logon-summary / eid-metrics) into the output folder and load
+   the produced CSV(s) into the generic grid. Best-effort — the subcommand's exact output naming varies,
+   so we diff the folder for any fresh CSV; if none appears the console log explains why. */
+function runMetric(sub, label){
+  var inp=$("inPath").value, inmode=$("inMode").value;
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  if(inmode==="d"){ if(!inp||!fso.FolderExists(inp)){ setStatus("Directory not found: "+inp,"err"); return; } }
+  else { if(!inp||!fso.FileExists(inp)){ setStatus("File not found: "+inp,"err"); return; } }
+  if(!EXE||!fileExists(EXE)){ setStatus("hayabusa.exe not found — install it first (Download Hayabusa).","err"); return; }
+  if(BUSY){ setStatus("A run is already in progress — wait for it to finish.","err"); return; }
+  if(!requireHost()) return;
+  var outdir=$("outDir").value; ensureFolder(outdir);
+  var outbase=outdir+"\\"+nowStamp()+"_"+sub.replace(/[^A-Za-z0-9]/g,"_");
+  var flag=(inmode==="d")?"-d":"-f";
+  var before=csvNameSet(outdir);
+  BUSY=true; $("procBtn").disabled=true;
+  appendLog("Running (best-effort): \""+EXE+"\" "+sub+" "+flag+" \""+inp+"\" -o \""+outbase+"\"");
+  var ctx=runBatAsync([
+    'cd /d "'+batEsc(EXE_DIR)+'"',
+    "echo Running "+label+" (best-effort)...",
+    '"'+batEsc(EXE)+'" '+sub+' '+flag+' "'+batEsc(inp)+'" -o "'+batEsc(outbase)+'" >> "__LOG__" 2>&1'
+  ], true);
+  ctx.onTick=function(s){ setStatus(label+" running… "+s+"s","muted"); };
+  ctx.onTimeout=function(){ BUSY=false; $("procBtn").disabled=false; setStatus(label+" still running after 60 min — stopped watching.","err"); };
+  ctx.onDone=function(log){ BUSY=false; $("procBtn").disabled=false;
+    appendLog("--- "+label+" ---\n"+log);
+    LASTOUTDIR=outdir;
+    var all=listCsvFiles(outdir), fresh=[];
+    for(var i=0;i<all.length;i++){ if(!before[all[i].name]) fresh.push(all[i]); }
+    if(!fresh.length){ populateProduced(all);
+      setStatus(label+" produced no CSV — the subcommand may only print to the console for this input, or the flags differ in this Hayabusa build. Click 'Show log'.","err"); return; }
+    populateProduced(all);
+    var main=fresh[0]; for(var j=1;j<fresh.length;j++){ if(fresh[j].size>main.size) main=fresh[j]; }
+    setStatus(label+" done — loaded "+main.name+(fresh.length>1?(" ("+fresh.length+" files; pick others from 'Produced CSVs')"):""),"ok");
+    loadCsvFile(main.path);
+  };
+  setStatus(label+" starting…","muted");
+  window.setTimeout(function(){ pollDone(ctx); }, 1000);
+}
 function fmtSize(n){ if(!n) return "0 B"; var u=["B","KB","MB","GB"], i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return n.toFixed(i?1:0)+" "+u[i]; }
 function populateProduced(list){
+  // QA F8: label by kind and float timelines to the top so exports don't bury the real output
   var sel=$("producedSel"); sel.innerHTML="";
-  for(var i=0;i<list.length;i++){
-    var lab=list[i].name+"  ("+fmtSize(list[i].size)+")";
-    var o=document.createElement("option"); o.value=list[i].path; o.text=lab; sel.add(o);
+  var arr=list.slice(0);
+  arr.sort(function(a,b){ var ta=/_Hayabusa_Timeline\.csv$/i.test(a.name)?0:1, tb=/_Hayabusa_Timeline\.csv$/i.test(b.name)?0:1;
+    if(ta!==tb) return ta-tb; return a.name<b.name?1:(a.name>b.name?-1:0); });
+  for(var i=0;i<arr.length;i++){
+    var kind=/_Hayabusa_Timeline\.csv$/i.test(arr[i].name)?"  — timeline":(/_export/i.test(arr[i].name)?"  — export":"");
+    var lab=arr[i].name+"  ("+fmtSize(arr[i].size)+")"+kind;
+    var o=document.createElement("option"); o.value=arr[i].path; o.text=lab; sel.add(o);
   }
-  showEl("producedRow", list.length>0);
+  showEl("producedRow", arr.length>0);
 }
 function openDir(){ var d=$("outDir").value; if(!d){ setStatus("No output directory set","err"); return; }
   try{ new ActiveXObject("WScript.Shell").Run('explorer.exe "'+d+'"',1,false); }catch(e){ setStatus("Could not open folder: "+e.message,"err"); } }
+/* Open the currently-loaded CSV in Eric Zimmerman's Timeline Explorer (enh). */
+function resolveTle(){
+  var c=["C:\\Program Files\\TimelineExplorer\\TimelineExplorer.exe",
+         "C:\\Tools\\TimelineExplorer\\TimelineExplorer.exe",
+         "C:\\ZimmermanTools\\TimelineExplorer\\TimelineExplorer.exe",
+         "C:\\Program Files (x86)\\TimelineExplorer\\TimelineExplorer.exe"];
+  for(var i=0;i<c.length;i++){ if(fileExists(c[i])) return c[i]; }
+  try{ var sh=new ActiveXObject("WScript.Shell"); var dl=sh.SpecialFolders("Desktop")+"\\TimelineExplorer.lnk";
+    if(fileExists(dl)){ var lk=sh.CreateShortcut(dl); if(lk.TargetPath && fileExists(lk.TargetPath+"")) return lk.TargetPath+""; } }catch(e){}
+  return "";
+}
+function openInTle(){
+  if(!CURRENT_CSV || !fileExists(CURRENT_CSV)){ setStatus("No loaded CSV to open.","err"); return; }
+  var tle=resolveTle();
+  if(!tle){ setStatus("Timeline Explorer not found (Program Files / C:\\Tools / ZimmermanTools). Open the CSV manually: "+CURRENT_CSV,"err"); return; }
+  try{ new ActiveXObject("WScript.Shell").Run('"'+tle+'" "'+CURRENT_CSV+'"',1,false); setStatus("Opening in Timeline Explorer…","ok"); }
+  catch(e){ setStatus("Could not launch Timeline Explorer: "+e.message,"err"); }
+}
+function openHtmlReport(){
+  if(!LAST_HTML || !fileExists(LAST_HTML)){ setStatus("No HTML report available — tick 'HTML report' before processing.","err"); return; }
+  try{ new ActiveXObject("WScript.Shell").Run('"'+LAST_HTML+'"',1,false); }
+  catch(e){ try{ new ActiveXObject("WScript.Shell").Run('explorer.exe "'+LAST_HTML+'"',1,false); }catch(e2){ setStatus("Could not open the HTML report: "+e.message,"err"); } }
+}
 
 /* ---------- CSV parser (RFC4180) ---------- */
 function countQuotes(s){ var c=0, idx=-1; while((idx=s.indexOf('"',idx+1))>=0) c++; return c; }
@@ -990,6 +1094,9 @@ function loadCsvFile(path){
     // QA F6: a 0-byte CSV is a legitimate 0-detection Hayabusa run — say so instead of "unparseable"
     var fsz=fileSize(path);
     if(fsz>=0 && fsz<3){ setStatus("This CSV is empty — a 0-detection Hayabusa run (nothing matched). Nothing to display.","ok"); return; }
+    // QA F11: exports land beside the loaded CSV and pick up the evidence host from its path (was analysis-box host).
+    CURRENT_CSV=path; LASTOUTDIR=parentDir(path); showEl("tleBtn",true);
+    if(!HOST_TOUCHED || !trimStr($("hostName").value)){ var gh=guessHost(path); if(gh) $("hostName").value=sanitHost(gh); }
     setStatus("Reading "+baseName(path)+"…","muted");
     var text=readUtf8(path);
     var raw=parseCSV(text);
@@ -1011,6 +1118,8 @@ function ingestHayabusa(raw, idx, head, srcLabel){
   var iTs=gi("Timestamp"), iTitle=gi("RuleTitle"), iLvl=gi("Level"), iComp=gi("Computer"),
       iCh=gi("Channel"), iEid=gi("EventID"), iRid=gi("RecordID"), iDet=gi("Details"),
       iExtra=gi("ExtraFieldInfo"), iRule=gi("RuleID"), iEt=gi("EventTime");
+  var iMitre=("MitreTactics" in idx)?idx["MitreTactics"]:(("MitreTags" in idx)?idx["MitreTags"]:-1);
+  HAS_MITRE=(iMitre>=0);
   // any non-core columns (verbose/super-verbose profiles) → surfaced in detail pane
   var extraColIdx=[];
   for(var c=0;c<head.length;c++){ var nm=trimStr(head[c]); if(nm && !KNOWN_COLS[nm]) extraColIdx.push({name:nm,i:c}); }
@@ -1034,7 +1143,7 @@ function ingestHayabusa(raw, idx, head, srcLabel){
       details:det, detSubs:splitSubs(det),
       extra:extra, extraSubs:splitSubs(extra),
       ruleId:trimStr(cell(rw,iRule)), eventTime:trimStr(cell(rw,iEt)),
-      xtra:xtra,
+      xtra:xtra, tactics:(iMitre>=0?parseTactics(cell(rw,iMitre)):[]),
       iocHits:[], noiseHit:false, score:0, tags:[], reasons:[], priority:false
     };
     rec.blob=(title+" "+det+" "+extra+" "+comp+" "+channel+" "+eid+" "+rec.ruleId).toLowerCase();
@@ -1053,7 +1162,8 @@ function ingestHayabusa(raw, idx, head, srcLabel){
   // (both CLI paths ingest after applyCaseWindow prefilled the filter; a plain reset erased it)
   DFROM=CASE_FROM?dayNum(CASE_FROM):0; DTO=CASE_TO?dayNum(CASE_TO):0;
   $("dfrom").value=CASE_FROM||""; $("dto").value=CASE_TO||"";
-  CURLVL="all"; TITLEONLY=""; renderTitleFilterChip(); highlightLvl();
+  CURLVL="all"; TITLEONLY=""; TACTICONLY=""; renderTitleFilterChip(); highlightLvl();
+  showEl("vTactic", HAS_MITRE);   // ATT&CK-tactic view only when the profile carried MitreTactics
   SORTKEY=0; SORTDIR=-1; TSORTKEY=-1;
   setView("chrono", true);
   closeDetail();
@@ -1085,9 +1195,11 @@ function scoreRec(r){
 }
 
 /* ---------- filtering ---------- */
+function rowHasTactic(r,tac){ for(var i=0;i<r.tactics.length;i++){ if(r.tactics[i]===tac) return true; } return false; }
 function baseFilter(r){
   if(CURCOMP && r.computer!==CURCOMP) return false;
   if(TITLEONLY && r.title!==TITLEONLY) return false;
+  if(TACTICONLY && !rowHasTactic(r,TACTICONLY)) return false;
   if(DFROM && (!r.dayTs || r.dayTs<DFROM)) return false;
   if(DTO && (!r.dayTs || r.dayTs>DTO)) return false;
   if(NOISE.length && !SHOWNOISE && r.noiseHit) return false;
@@ -1126,7 +1238,8 @@ function setView(v, quiet){
   $("vChrono").className=(v==="chrono")?"btn on":"btn";
   $("vSev").className=(v==="sev")?"btn on":"btn";
   $("vTitle").className=(v==="title")?"btn on":"btn";
-  $("tableTitle").innerHTML=(v==="sev")?"Detections by severity":((v==="title")?"Rules (grouped by title)":"Detections (chronological)");
+  var vt=$("vTactic"); if(vt) vt.className=(v==="tactic")?"btn on":"btn";
+  $("tableTitle").innerHTML=(v==="sev")?"Detections by severity":((v==="title")?"Rules (grouped by title)":((v==="tactic")?"MITRE ATT&CK tactics":"Detections (chronological)"));
   if(!quiet) render();
 }
 function render(){
@@ -1136,6 +1249,7 @@ function render(){
   renderOverview(filteredRows());
   if(VIEW==="sev") renderSev();
   else if(VIEW==="title") renderTitle();
+  else if(VIEW==="tactic") renderTactic();
   else renderChrono();
 }
 
@@ -1344,6 +1458,71 @@ function renderTitle(){
   window.__titleFull=groups;
 }
 
+/* ---------- by-MITRE-tactic view (aggregated; a detection can map to several tactics) ---------- */
+var MTCOLS=[
+  {h:"ATT&CK tactic", sk:function(g){return g.tacL;}},
+  {h:"Max level", sk:function(g){return g.rank;}},
+  {h:"Detections", sk:function(g){return g.count;}},
+  {h:"Rules", sk:function(g){return g.ruleN;}},
+  {h:"Computers", sk:function(g){return g.compN;}},
+  {h:"First seen (UTC)", sk:function(g){return g.minMs;}},
+  {h:"Last seen (UTC)", sk:function(g){return g.maxMs;}}
+];
+var MTSORTKEY=-1, MTSORTDIR=-1;
+function buildTacticGroups(rows){
+  var map={}, order=[];
+  function grp(t){ var g=map["t_"+t]; if(!g){ g=map["t_"+t]={tac:t, tacL:t.toLowerCase(), rank:0, lkey:"info",
+    count:0, comps:{}, compN:0, rules:{}, ruleN:0, minMs:0,maxMs:0,minTs:"",maxTs:"", ioc:0}; order.push(g); } return g; }
+  for(var i=0;i<rows.length;i++){ var r=rows[i];
+    var ts=r.tactics.length?r.tactics:["(no tactic mapped)"];
+    for(var j=0;j<ts.length;j++){ var g=grp(ts[j]);
+      g.count++;
+      if(r.rank>g.rank){ g.rank=r.rank; g.lkey=r.lkey; }
+      if(r.computer && !g.comps[r.computer]){ g.comps[r.computer]=1; g.compN++; }
+      if(!g.rules["r_"+r.title]){ g.rules["r_"+r.title]=1; g.ruleN++; }
+      if(r.iocHits.length) g.ioc++;
+      if(r.msTs){ if(!g.minMs||r.msTs<g.minMs){ g.minMs=r.msTs; g.minTs=r.ts; } if(r.msTs>g.maxMs){ g.maxMs=r.msTs; g.maxTs=r.ts; } }
+    } }
+  return order;
+}
+function renderTactic(){
+  var rows=filteredRows();
+  var anyTac=false; for(var z=0;z<rows.length;z++){ if(rows[z].tactics.length){ anyTac=true; break; } }
+  if(!anyTac){
+    $("tbl").innerHTML='<tbody><tr><td style="padding:14px" class="muted">No MITRE ATT&amp;CK tactic data in this dataset. Re-run with the <b>verbose</b> profile (it adds the <span class="mono">MitreTactics</span> column), or load a verbose CSV, to populate this view.</td></tr></tbody>';
+    $("count").innerHTML="0 tactics"; window.__tacticRows=[]; window.__tacticFull=[]; return;
+  }
+  var groups=buildTacticGroups(rows);
+  if(MTSORTKEY<0){ groups.sort(function(a,b){ return b.rank-a.rank || b.count-a.count; }); }
+  else { var sk=MTCOLS[MTSORTKEY].sk, dir=MTSORTDIR;
+    groups.sort(function(a,b){ var x=sk(a),y=sk(b);
+      if(typeof x==="number"&&typeof y==="number") return (x-y)*dir;
+      x=String(x); y=String(y); return x<y?-dir:(x>y?dir:0); }); }
+  var html="<thead><tr>";
+  for(var c=0;c<MTCOLS.length;c++){ var arrow=(MTSORTKEY===c)?(MTSORTDIR>0?" ▲":" ▼"):"";
+    html+='<th data-k="'+c+'">'+esc(MTCOLS[c].h)+arrow+'</th>'; }
+  html+="</tr></thead><tbody>";
+  for(var i=0;i<groups.length;i++){ var g=groups[i];
+    html+='<tr data-tac="'+i+'" style="cursor:pointer">'
+      +'<td title="drill into this tactic">'+esc(g.tac)+(g.ioc?' <span class="tag ioc">IOC</span>':'')+'</td>'
+      +'<td>'+levelChip(g.lkey)+'</td>'
+      +'<td class="mono" style="text-align:right">'+nf(g.count)+'</td>'
+      +'<td class="mono" style="text-align:right">'+nf(g.ruleN)+'</td>'
+      +'<td class="mono" style="text-align:right">'+nf(g.compN)+'</td>'
+      +'<td class="mono">'+esc(g.minTs)+'</td>'
+      +'<td class="mono">'+esc(g.maxTs)+'</td></tr>';
+  }
+  html+="</tbody>"; $("tbl").innerHTML=html;
+  $("count").innerHTML=nf(groups.length)+" tactic"+(groups.length===1?"":"s");
+  var ths=$("tbl").getElementsByTagName("th");
+  for(var j=0;j<ths.length;j++){ ths[j].onclick=function(e){ e=e||window.event; var t=e.target||e.srcElement;
+    if(t && /\bcgrip\b/.test(t.className+"")) return;
+    var kk=parseInt(this.getAttribute("data-k"),10);
+    if(MTSORTKEY===kk) MTSORTDIR*=-1; else { MTSORTKEY=kk; MTSORTDIR=1; } renderTactic(); }; }
+  applyFreeze(); setupColResize();
+  window.__tacticRows=groups; window.__tacticFull=groups;
+}
+
 function applyFreeze(){
   var sc=$("tblScroll"); if(!sc) return;
   var ths=$("tbl").getElementsByTagName("th"); var y=sc.scrollTop;
@@ -1459,9 +1638,26 @@ function subsBlock(subs){
   }
   h+='</div>'; return h;
 }
+function detailIndexOf(rec){ var rows=window.__viewRows||[]; for(var i=0;i<rows.length;i++){ if(rows[i]===rec) return i; } return -1; }
+function detailNav(delta){
+  var rows=window.__viewRows||[]; if(!rows.length) return;
+  var i=DETIDX+delta; if(i<0||i>=rows.length) return;
+  renderDetailEvent(rows[i]);
+  var trs=$("tbl").getElementsByTagName("tr");
+  for(var z=0;z<trs.length;z++){ var zi=trs[z].getAttribute("data-i");
+    if(zi!=null&&zi!==""){ var zr=rows[parseInt(zi,10)]; var base=zr?rowClass(zr):"";
+      var sel=(parseInt(zi,10)===i); trs[z].className=sel?((base?base+" ":"")+"sel"):base;
+      if(sel && trs[z].scrollIntoView){ try{ trs[z].scrollIntoView(false); }catch(e){} } } }
+}
 function renderDetailEvent(rec){
-  DETREC=rec;
-  var h='<div style="font-size:14px;margin-bottom:6px"><b>'+esc(rec.title)+'</b> &nbsp;'+levelChip(rec.lkey)+' '+iocTag(rec)+'</div>';
+  DETREC=rec; DETIDX=detailIndexOf(rec);
+  var __rows=window.__viewRows||[];
+  var h='';
+  if(DETIDX>=0){ h+='<div style="margin-bottom:6px"><button class="btn" id="detPrev"'+(DETIDX<=0?' disabled':'')+'>&#9664; prev</button> '
+    +'<button class="btn" id="detNext"'+(DETIDX>=__rows.length-1?' disabled':'')+'>next &#9654;</button> '
+    +'<span class="muted" style="font-size:11px">'+nf(DETIDX+1)+' of '+nf(__rows.length)+' in view</span></div>'; }
+  h+='<div style="font-size:14px;margin-bottom:6px"><b>'+esc(rec.title)+'</b> &nbsp;'+levelChip(rec.lkey)+' '+iocTag(rec)+'</div>';
+  if(rec.tactics.length){ h+='<div style="margin-bottom:6px">'; for(var tk=0;tk<rec.tactics.length;tk++) h+='<span class="chip lv-info" style="margin-right:4px" title="MITRE ATT&CK tactic">'+esc(rec.tactics[tk])+'</span>'; h+='</div>'; }
   if(rec.reasons.length){ h+='<div style="font-size:12px;color:#ff9b9b;margin-bottom:6px">';
     for(var q=0;q<rec.reasons.length;q++) h+="&bull; "+esc(rec.reasons[q])+"<br>"; h+='</div>'; }
   h+='<div class="mono muted" style="font-size:11px;margin-bottom:8px">'
@@ -1474,6 +1670,8 @@ function renderDetailEvent(rec){
     for(var e=0;e<rec.xtra.length;e++){ h+='<div><span class="kv">'+esc(rec.xtra[e].name)+':</span> '+hlWrap(rec.xtra[e].val)+'</div>'; }
     h+='</div>'; }
   $("detBody").innerHTML=h;
+  var pv=$("detPrev"); if(pv) pv.onclick=function(){ detailNav(-1); };
+  var nx=$("detNext"); if(nx) nx.onclick=function(){ detailNav(1); };
   $("detCopy").style.display="";
   showEl("detailCard",true);
 }
@@ -1483,7 +1681,8 @@ function renderDetailTitle(g){
   h+='<div class="mono muted" style="font-size:12px;margin-bottom:8px">'
     +nf(g.count)+' detection'+(g.count===1?"":"s")+' &middot; '+nf(g.compN)+' computer'+(g.compN===1?"":"s")
     +' &middot; first '+esc(g.minTs)+' &middot; last '+esc(g.maxTs)+' (UTC)</div>';
-  h+='<div style="margin-bottom:8px"><button class="btn primary" id="drillBtn">View these '+nf(g.count)+' in chronological view</button></div>';
+  h+='<div style="margin-bottom:8px"><button class="btn primary" id="drillBtn">View these '+nf(g.count)+' in chronological view</button> '
+    +'<button class="btn" id="muteBtn" title="Add this rule title to the noise/known-FP list (hidden unless \'show suppressed\' is on)">Mute this rule</button></div>';
   // sample rows
   var samp=[]; for(var i=0;i<ROWS.length && samp.length<25;i++){ if(baseFilter(ROWS[i]) && ROWS[i].title===g.title) samp.push(ROWS[i]); }
   samp.sort(function(a,b){ return b.msTs-a.msTs; });
@@ -1494,13 +1693,26 @@ function renderDetailTitle(g){
   $("detBody").innerHTML=h;
   $("detCopy").style.display="none";
   var db=$("drillBtn"); if(db) db.onclick=function(){ TITLEONLY=g.title; renderTitleFilterChip(); setView("chrono"); };
+  var mb=$("muteBtn"); if(mb) mb.onclick=function(){ addToNoise(g.title); };
   showEl("detailCard",true);
 }
+/* enh: one-click mute — append a rule title to the noise list and re-apply (hides it unless "show suppressed") */
+function addToNoise(term){
+  term=trimStr(String(term||"")); if(!term) return;
+  var cur=$("noiseBox").value, has=false, cp=String(cur).split(/[\r\n,;]+/);
+  for(var i=0;i<cp.length;i++){ if(trimStr(cp[i]).toLowerCase()===term.toLowerCase()){ has=true; break; } }
+  if(!has) $("noiseBox").value=(trimStr(cur)?(cur.replace(/\s+$/,"")+"\r\n"):"")+term;
+  showEl("noiseWrap",true);
+  applyNoise();
+  setStatus((has?"Already muted: ":"Muted (added to noise list): ")+trunc(term,60),"ok");
+}
 function renderTitleFilterChip(){
-  var w=$("tfiltWrap");
-  if(TITLEONLY){ w.innerHTML='<span class="tfilt">rule: '+esc(trunc(TITLEONLY,50))+'<span class="x" id="tfiltX">&times;</span></span>';
-    var x=$("tfiltX"); if(x) x.onclick=function(){ TITLEONLY=""; renderTitleFilterChip(); render(); }; }
-  else w.innerHTML="";
+  var w=$("tfiltWrap"), h="";
+  if(TITLEONLY) h+='<span class="tfilt">rule: '+esc(trunc(TITLEONLY,50))+'<span class="x" id="tfiltX">&times;</span></span>';
+  if(TACTICONLY) h+='<span class="tfilt">tactic: '+esc(trunc(TACTICONLY,40))+'<span class="x" id="tfiltTx">&times;</span></span>';
+  w.innerHTML=h;
+  var x=$("tfiltX"); if(x) x.onclick=function(){ TITLEONLY=""; renderTitleFilterChip(); render(); };
+  var tx=$("tfiltTx"); if(tx) tx.onclick=function(){ TACTICONLY=""; renderTitleFilterChip(); render(); };
 }
 function closeDetail(){ DETREC=null; showEl("detailCard",false); $("detBody").innerHTML=""; }
 function copyDetail(){
@@ -1622,7 +1834,10 @@ function writeExport(lines, tag){
   var dir=LASTOUTDIR||$("outDir").value;
   if(!dir){ setStatus("No output directory set","err"); return; }
   ensureFolder(dir);
-  var path=dir+"\\"+tag+"_export_"+nowStamp()+".csv";
+  // enh8: prefix the evidence host and (if set) the case window so exports self-describe
+  var host=sanitHost($("hostName").value);
+  var win=(CASE_FROM||CASE_TO)?("_"+(CASE_FROM||"start")+"_to_"+(CASE_TO||"end")):"";
+  var path=dir+"\\"+(host?host+"_":"")+tag+win+"_export_"+nowStamp()+".csv";
   try{ writeUtf8(path, lines.join("\r\n")); setStatus("Exported "+nf(lines.length-1)+" rows → "+path,"ok"); appendLog("Exported: "+path); }
   catch(e){ setStatus("Export failed: "+e.message,"err"); }
 }
@@ -1752,6 +1967,7 @@ function applyCli(cli){
   if(cli.outDir){ $("outDir").value=cli.outDir; OUT_TOUCHED=true; hostGuessFrom(cli.outDir); }
   else hostGuessFrom(cli.input);
   if(cli.auto){
+    AUTORUN=true;   // QA F7: suppress the startup Defender modal — it must not pop mid-run during a bulk /auto session
     appendLog("CLI: /auto — processing "+cli.input);
     window.setTimeout(function(){ processHb(); }, 200);
   } else {
@@ -1793,6 +2009,8 @@ function init(){
   $("updBtn").onclick=updateRules;
   $("getBtn").onclick=downloadHayabusa;
   $("openDirBtn").onclick=openDir;
+  $("htmlBtn").onclick=openHtmlReport;
+  $("tleBtn").onclick=openInTle;
   $("procBtn").onclick=processHb;
   $("liveBtn").onclick=function(){
     $("inMode").value="d"; $("inPath").value=LIVE_LOGS;
@@ -1817,6 +2035,8 @@ function init(){
     $("inPath").value=v; hostGuessFrom(v); } };
   $("loadBtn").onclick=function(){ $("csvPick").click(); };
   $("csvPick").onchange=function(){ if(this.value){ setStatus("Loading "+this.value,"muted"); loadCsvFile(this.value); } };
+  $("logonBtn").onclick=function(){ runMetric("logon-summary","Logon summary"); };
+  $("eidBtn").onclick=function(){ runMetric("eid-metrics","EID metrics"); };
   $("logToggle").onclick=function(){ var l=$("log");
     if(l.style.display==="none"||!l.style.display){
       if(!trimStr(l.innerHTML.replace(/<[^>]*>/g,""))){ l.innerHTML='<span class="muted">(empty — Hayabusa output appears here after a run. A console window shows live progress while it runs.)</span>'; l.setAttribute("data-ph","1"); }
@@ -1833,13 +2053,14 @@ function init(){
   $("dto").onchange=function(){ DTO=dayNum(this.value); render(); };
   $("compSel").onchange=function(){ CURCOMP=this.value; render(); };
   $("clearBtn").onclick=function(){ $("q").value="";$("dfrom").value="";$("dto").value="";$("compSel").value="";
-    QUERY="";DFROM=0;DTO=0;CURCOMP="";CURLVL="all";TITLEONLY=""; renderTitleFilterChip(); highlightLvl(); render(); };
+    QUERY="";DFROM=0;DTO=0;CURCOMP="";CURLVL="all";TITLEONLY="";TACTICONLY=""; renderTitleFilterChip(); highlightLvl(); render(); };
   $("exportBtn").onclick=exportView;
   $("copyBtn").onclick=copyNotes;
 
   $("vChrono").onclick=function(){ setView("chrono"); };
   $("vSev").onclick=function(){ setView("sev"); };
   $("vTitle").onclick=function(){ setView("title"); };
+  $("vTactic").onclick=function(){ setView("tactic"); };
   $("iocBtn").onclick=function(){ var w=$("iocWrap"); showEl("iocWrap", /\bhide\b/.test(w.className)); };
   $("iocApply").onclick=applyIocs;
   $("iocLoad").onclick=function(){ $("iocPick").click(); };
@@ -1865,6 +2086,9 @@ function init(){
     if(grp){ GOPEN[grp]=GOPEN[grp]?0:1; renderSev(); return; }
     var ti=n.getAttribute("data-t");
     if(ti!=null && ti!==""){ var gi=parseInt(ti,10); var gs=window.__titleRows||[]; if(gi>=0&&gi<gs.length) renderDetailTitle(gs[gi]); return; }
+    var tac=n.getAttribute("data-tac");
+    if(tac!=null && tac!==""){ var ai=parseInt(tac,10); var as=window.__tacticRows||[];
+      if(ai>=0&&ai<as.length && as[ai].tac!=="(no tactic mapped)"){ TACTICONLY=as[ai].tac; renderTitleFilterChip(); setView("chrono"); } return; }
     var di=n.getAttribute("data-i");
     if(di!=null && di!==""){ var ix=parseInt(di,10); var rows=window.__viewRows||[];
       if(ix>=0&&ix<rows.length){ renderDetailEvent(rows[ix]);
@@ -1963,8 +2187,9 @@ window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }
     </ul>
     <h3>Views</h3>
     <ul>
-      <li><b>Chronological</b> (default), <b>By severity</b> (collapsible groups), and <b>By rule title</b> (aggregated). IOC list, noise/known-FP list, and a detail pane are built in.</li>
-      <li><b>Resizable columns</b> — drag a column-header edge to resize (widths are remembered per view); double-click the edge to reset all widths.</li>
+      <li><b>Chronological</b> (default), <b>By severity</b>, <b>By rule title</b>, and <b>By ATT&amp;CK tactic</b> (appears when the CSV carries MITRE tactics — run with the <b>verbose</b> profile). Click a tactic or rule to drill into its detections.</li>
+      <li>Detail pane: <b>prev / next</b> buttons walk detections in the current view; <b>Mute this rule</b> (in a rule's detail) adds it to the noise list. IOC list, noise/known-FP list built in.</li>
+      <li><b>Resizable columns</b> — drag a column-header edge (widths remembered per view); double-click the edge to reset.</li>
     </ul>
     <h3>Command line</h3>
     <p><code>mshta "Hayabusa-Wrapper.hta" "&lt;inputOrCsv&gt;" ["&lt;outDir&gt;"] [/auto] [/from:yyyy-MM-dd] [/to:yyyy-MM-dd]</code></p>
@@ -1980,6 +2205,7 @@ window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }
     <ul>
       <li>Runs <code>--no-wizard --ISO-8601</code> (non-interactive, always-UTC <code>…Z</code>) and updates rules first by default. Validated against Hayabusa 3.10.0.</li>
       <li><b>Defender:</b> Sigma rule files contain attack-signature text and can be flagged during rule updates — on startup the app checks for a Defender path exclusion covering the Hayabusa folder and offers to add one (UAC prompt).</li>
+      <li><b>HTML report</b> checkbox writes Hayabusa's own <code>-H</code> summary next to the CSV (then <b>Open HTML report</b>). <b>Logon summary</b> / <b>EID metrics</b> run those Hayabusa subcommands into the grid. <b>Open in Timeline Explorer</b> hands the loaded CSV to TLE. Exports are named <code>&lt;host&gt;_…</code> and land beside the source.</li>
     </ul>
     <p class="muted" style="font-size:11px">MIT © 2026 Ben Morris — click the link above for the full README &amp; releases.</p>
   </div>
