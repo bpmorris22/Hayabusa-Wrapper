@@ -169,7 +169,8 @@
       &nbsp;<label style="font-size:12px" title="-P: scan with only Hayabusa's 'proven' rules — much faster and far fewer detections. Good for a quick first pass on a huge tree; NOT a thorough review.">
         <input type="checkbox" id="optProven"> proven only (fast)</label>
     </label>
-    <input class="txt wide" id="inPath" value="">
+    <label class="fld" title="The folder of .evtx to recurse (directory mode) or a single .evtx (file mode). KAPE / Velociraptor collection trees work as-is. Launched from the DFIR Windows Artifact Finder, this is pre-filled with the collected event-log path.">Event-log path (folder or single .evtx)</label>
+    <input class="txt wide" id="inPath" value="" title="Event-log source: a folder to recurse, or a single .evtx file.">
     <input type="file" id="inPick" style="display:none">
     <button class="btn" id="browseBtn">Browse&hellip;</button>
     <button class="btn" id="liveBtn" title="Point at this machine's live event logs (C:\Windows\System32\winevt\Logs). Reading them needs an ELEVATED run.">Scan this machine</button>
@@ -282,7 +283,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.8.1";
+var APP_VERSION = "0.8.2";
 var KNOWN_LATEST = "3.10.0";                                                       // offline-fallback baseline as of 2026-07-08
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -916,7 +917,8 @@ function processHb(){
   if(!outdir){ setStatus("Set an output directory","err"); return; }
   if(!EXE||!fileExists(EXE)){ setStatus("hayabusa.exe not found — install it first (Get Hayabusa…)","err"); return; }
   if(BUSY){ setStatus("A run is already in progress — wait for it to finish.","err"); return; }
-  var csvOut=outdir+"\\"+nowStamp()+"_Hayabusa_Timeline.csv";
+  var hostTag=sanitHost($("hostName").value); if(hostTag) hostTag+="_";
+  var csvOut=outdir+"\\"+nowStamp()+"_"+hostTag+"Hayabusa_Timeline.csv";
   var cmd=buildTimelineCmd(inp, inmode, csvOut);
   var doUpd=$("optUpd").checked;
   appendLog("Running Hayabusa"+(doUpd?" (update-rules first)":"")+":\n"+cmd
@@ -995,14 +997,18 @@ function runMetric(sub, label){
   if(!requireHost()) return;
   var outdir=$("outDir").value; ensureFolder(outdir);
   var outbase=outdir+"\\"+nowStamp()+"_"+sub.replace(/[^A-Za-z0-9]/g,"_");
+  // -o shape differs per subcommand: eid-metrics writes ONE csv to the -o file (needs the .csv name),
+  // logon-summary treats -o as a BASE and appends -successful.csv / -failed.csv. Give each what it expects
+  // (a base with no extension made eid-metrics write a file with no .csv, which the fresh-CSV scan missed).
+  var outArg=(sub==="eid-metrics")?(outbase+".csv"):outbase;
   var flag=(inmode==="d")?"-d":"-f";
   var before=csvNameSet(outdir);
   BUSY=true; $("procBtn").disabled=true;
-  appendLog("Running (best-effort): \""+EXE+"\" "+sub+" "+flag+" \""+inp+"\" -o \""+outbase+"\"");
+  appendLog("Running (best-effort): \""+EXE+"\" "+sub+" "+flag+" \""+inp+"\" -o \""+outArg+"\"");
   var ctx=runBatAsync([
     'cd /d "'+batEsc(EXE_DIR)+'"',
     "echo Running "+label+" (best-effort)...",
-    '"'+batEsc(EXE)+'" '+sub+' '+flag+' "'+batEsc(inp)+'" -o "'+batEsc(outbase)+'" >> "__LOG__" 2>&1'
+    '"'+batEsc(EXE)+'" '+sub+' '+flag+' "'+batEsc(inp)+'" -o "'+batEsc(outArg)+'" >> "__LOG__" 2>&1'
   ], true);
   ctx.onTick=function(s){ setStatus(label+" running… "+s+"s","muted"); };
   ctx.onTimeout=function(){ BUSY=false; $("procBtn").disabled=false; setStatus(label+" still running after 60 min — stopped watching.","err"); };
@@ -1965,7 +1971,18 @@ function applyCli(cli){
   applyCaseWindow(cli.from, cli.to);   // case window (UTC): prefill the date filter BEFORE any /auto run — filter only, never scored
   if(cli.min){ try{ $("optMin").value=cli.min.toLowerCase(); }catch(e){} }
   if(cli.profile){ try{ $("optProfile").value=cli.profile.toLowerCase(); }catch(e){} }
+  // output folder + hostname context FIRST, so even a reopened CSV (the Finder "Open" action, which passes
+  // the _Processed\<host>\Hayabusa folder) shows the right output dir and the collected host, not this VM's name.
+  if(cli.outDir){ try{ $("outDir").value=cli.outDir; OUT_TOUCHED=true; }catch(eo){} hostGuessFrom(cli.outDir); }
   if(/\.csv$/i.test(cli.input) && fso.FileExists(cli.input)){
+    if(!cli.outDir) hostGuessFrom(cli.input);   // best-effort host from the CSV path itself
+    // reopened output (Finder "Open"): recover the ORIGINAL event-log source from the run's provenance
+    // so the path field shows what was processed, not this machine's live-logs default.
+    try{ if(cli.outDir){ var ri=String(cli.outDir).replace(/[\\\/]+$/,"")+"\\runinfo.json";
+      if(fso.FileExists(ri)){ var rarr=JSON.parse(readUtf8(ri));
+        if(rarr && rarr.length){ for(var qi=rarr.length-1;qi>=0;qi--){ var re=rarr[qi];
+          if(re && re.input){ $("inPath").value=re.input;
+            try{ $("inMode").value=(/\.evtx$/i.test(re.input)?"f":"d"); }catch(em){} break; } } } } } }catch(er){}
     appendLog("CLI: loading CSV "+cli.input);
     window.setTimeout(function(){ loadCsvFile(cli.input); }, 60);
     return true;
@@ -1973,8 +1990,7 @@ function applyCli(cli){
   if(fso.FolderExists(cli.input)){ $("inMode").value="d"; $("inPath").value=cli.input; }
   else if(fso.FileExists(cli.input)){ $("inMode").value="f"; $("inPath").value=cli.input; }
   else { setStatus("CLI input not found: "+cli.input,"err"); appendLog("CLI input not found: "+cli.input); return false; }
-  if(cli.outDir){ $("outDir").value=cli.outDir; OUT_TOUCHED=true; hostGuessFrom(cli.outDir); }
-  else hostGuessFrom(cli.input);
+  if(!cli.outDir) hostGuessFrom(cli.input);
   if(cli.auto){
     AUTORUN=true;   // QA F7: suppress the startup Defender modal — it must not pop mid-run during a bulk /auto session
     appendLog("CLI: /auto — processing "+cli.input);
