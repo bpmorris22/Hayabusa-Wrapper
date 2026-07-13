@@ -43,7 +43,7 @@
 <style>
   html{margin:0;height:100%;background:#0d1117}
   body{margin:0;height:100%;background:#0d1117;color:#e6edf3;font-family:Segoe UI,Tahoma,sans-serif;font-size:16px}
-  #content{zoom:0.9;box-sizing:border-box}
+  #content{zoom:0.9;width:111.111%;box-sizing:border-box}   /* zoom<1 shrinks a 100%-wide block below viewport width — widen by 1/zoom in CSS so it fills the window from the first paint (applyZoom keeps it in sync for A-/A+) */
   a{color:#58a6ff}
   .mono{font-family:Consolas,"Courier New",monospace}
   .muted{color:#8b949e}
@@ -242,6 +242,9 @@
         <input class="txt" id="q" placeholder="search all columns (title, details, computer, channel, rule id&hellip;)" style="width:300px">
         <span id="compWrap" class="hide"><span class="sep"></span><label class="muted" style="font-size:12px">computer:</label>
           <select id="compSel" title="Filter by source computer."><option value="">all computers</option></select></span>
+        <span id="userWrap" class="hide"><span class="sep"></span><label class="muted" style="font-size:12px">user:</label>
+          <select id="userSel" title="Filter to one account parsed from the Details blob (SubjectUserName / TargetUserName / User / Src- / TgtUser). Best-effort: coverage depends on the Sigma rule, rows with no user field are never listed, and SYSTEM/machine accounts appear too — use the toggle to hide those in bulk. Lists every distinct parsed account; for a human-account-only view, combine with the toggle."><option value="">all users</option></select></span>
+        <span id="hideSysWrap" class="hide"><span class="sep"></span><label class="muted" style="font-size:12px" title="Hide detections attributed SOLELY to SYSTEM, LOCAL/NETWORK SERVICE, ANONYMOUS LOGON, or machine ($) accounts — the bulk of event-log noise — so human-account activity stands out. A row is kept if ANY of its user fields is a human account, or if it carries no user field at all (many Sysmon/process events). The account is parsed from the Details blob (SubjectUserName / TargetUserName / User / Src- / TgtUser); coverage depends on the Sigma rule, so treat this as a triage aid, not a guarantee."><input type="checkbox" id="hideSys"> hide SYSTEM/machine (<span id="hideSysN">0</span>)</label></span>
         <span class="sep"></span>
         <input class="txt mono" id="dfrom" placeholder="from YYYY-MM-DD" style="width:140px" title="Filter by Timestamp (UTC)">
         <span class="muted">&rarr;</span>
@@ -273,7 +276,7 @@
         <span class="muted" id="noiseInfo" style="font-size:11px"></span>
       </div>
       <div class="scroll" id="tblScroll"><table id="tbl"></table></div>
-      <div class="muted" id="hbFoot" style="font-size:11px;margin-top:6px">All timestamps are UTC (ISO-8601, …Z). Row tint = severity; red left-border = IOC hit. Click a detection for full detail (all fields split out). In "By severity" click a group header to collapse it; in "By rule title" click a rule to drill in. Max <span id="maxrowLbl"></span> rows shown; export writes the full filtered set.</div>
+      <div class="muted" id="hbFoot" style="font-size:11px;margin-top:6px">All timestamps are UTC (ISO-8601, …Z). Row tint = severity; red left-border = IOC hit. Click a detection for full detail (all fields split out). In "By severity" click a group header to collapse it; in "By rule title" click a rule to drill in. The <b>user:</b> dropdown isolates one account (parsed from Details); the <b>hide SYSTEM/machine</b> toggle drops detections attributed solely to SYSTEM/service/machine accounts in bulk so human-account activity stands out — rows with a human user, or no user field, stay. Max <span id="maxrowLbl"></span> rows shown; export writes the full filtered set.</div>
     </div>
 
     <div class="card hide" id="detailCard">
@@ -287,7 +290,7 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.9.1";
+var APP_VERSION = "0.11.1";
 var KNOWN_LATEST = "3.10.0";                                                       // offline-fallback baseline as of 2026-07-08
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
@@ -306,6 +309,8 @@ var VIEW = "chrono";                 // "chrono" | "sev" | "title"
 var ROWS = [];                       // detection records
 var CURLVL = "all";                  // level filter: all|crit|high|med|low|info|ioc
 var CURCOMP = "";                    // computer filter
+var HIDESYS = false;                 // "hide SYSTEM/machine accounts" toggle (hb mode) — user-filter v1 (spec §4.10)
+var CURUSER = "";                    // per-account dropdown filter (hb mode) — user-filter v2; matches rec.userDisp
 var TITLEONLY = "";                  // exact-rule-title drill-down filter
 var DFROM = 0, DTO = 0;
 var SORTKEY = 0, SORTDIR = -1;       // chrono: default Timestamp desc
@@ -384,6 +389,43 @@ function parseTactics(raw){
   var parts=raw.split(/\s*(?:Â?¦|[,;|])\s*/), out=[], seen={};
   for(var i=0;i<parts.length;i++){ var p=trimStr(parts[i]); if(p!==""){ var lk=p.toLowerCase(); if(!seen[lk]){ seen[lk]=1; out.push(p); } } }
   return out;
+}
+
+/* ---------- account extraction from the Details blob (user-filter v1, spec §4.10) ----------
+   The standard Hayabusa profile has NO user column — account identity lives inside Details as
+   "Key: value" pairs. Field key names vary per Sigma rule, so we scan a known set. This powers the
+   "hide SYSTEM/machine" toggle (and a User column in the export); it is best-effort, not exhaustive. */
+var HB_USERKEYS={user:1,users:1,tgtuser:1,targetusername:1,subjectusername:1,srcuser:1,sourceuser:1,
+  accountname:1,samaccountname:1,username:1,account:1,callerusername:1};
+function subKV(sub){ var s=String(sub); var i=s.indexOf(":"); if(i<0) return null;
+  return {k:trimStr(s.substring(0,i)).toLowerCase(), v:trimStr(s.substring(i+1))}; }
+/* every account value named on a row (Details + ExtraFieldInfo subs + any verbose user columns) */
+function usersOfRow(r){
+  var out=[], arrs=[r.detSubs, r.extraSubs], a, i, kv;
+  for(a=0;a<arrs.length;a++){ var subs=arrs[a]||[];
+    for(i=0;i<subs.length;i++){ kv=subKV(subs[i]);
+      if(kv && HB_USERKEYS[kv.k] && kv.v!=="" && kv.v!=="-") out.push(kv.v); } }
+  if(r.xtra){ for(i=0;i<r.xtra.length;i++){ var nm=String(r.xtra[i].name).toLowerCase(), vv=trimStr(r.xtra[i].val);
+    if(HB_USERKEYS[nm] && vv!=="" && vv!=="-") out.push(vv); } }
+  return out;
+}
+/* SYSTEM / service / machine ($) / anonymous / null accounts — the noise the toggle hides */
+function isSysAcct(v){ if(v==null) return true; var s=trimStr(String(v)).toLowerCase();
+  if(s==="" || s==="-" || s==="n/a" || s==="null") return true;
+  var bs=s.lastIndexOf("\\"); var name=(bs>=0)?s.substring(bs+1):s;   // strip DOMAIN\ / NT AUTHORITY\
+  if(name==="system" || name==="localsystem" || name==="local service" || name==="network service") return true;
+  if(name==="anonymous logon" || name==="iusr") return true;
+  if(/^(dwm|umfd)-\d+$/.test(name)) return true;                      // window-manager / font-driver pseudo-users
+  if(/\$$/.test(name)) return true;                                   // machine account
+  return false;
+}
+/* returns {disp, isSys}: isSys is true only when the row names ≥1 account and ALL are system/machine —
+   so any human account (or no account at all) keeps the row visible under the toggle */
+function classifyRowUser(r){
+  var us=usersOfRow(r); if(!us.length) return {disp:"", isSys:false};
+  var human="", allSys=true;
+  for(var i=0;i<us.length;i++){ if(!isSysAcct(us[i])){ allSys=false; if(!human) human=us[i]; } }
+  return {disp:(human||us[0]), isSys:allSys};
 }
 
 /* ---------- file IO via ActiveX (UTF-8 safe, with network-zone fallback) ----------
@@ -502,6 +544,16 @@ function populateComputerFilter(vals){
   CURCOMP=""; sel.value="";
   showEl("compWrap", vals.length>1);
 }
+/* user-filter v2: per-account dropdown (values are rec.userDisp parsed from Details) — clone of the computer filter */
+function populateUserFilter(vals){
+  var sel=$("userSel"); if(!sel) return;
+  sel.innerHTML="";
+  var o0=document.createElement("option"); o0.value=""; o0.text="all users ("+vals.length+")"; sel.add(o0);
+  vals=vals.slice(0).sort();
+  for(var i=0;i<vals.length;i++){ var o=document.createElement("option"); o.value=vals[i]; o.text=vals[i]; sel.add(o); }
+  CURUSER=""; sel.value="";
+  showEl("userWrap", vals.length>1);
+}
 
 /* ---------- tooling: locate / version / rules ---------- */
 function fileExists(p){ try{ return new ActiveXObject("Scripting.FileSystemObject").FileExists(p); }catch(e){ return false; } }
@@ -594,12 +646,12 @@ function openReleases(){ try{ new ActiveXObject("WScript.Shell").Run('"'+HB_RELE
 /* Download + install Hayabusa next to the .hta, auto-picking the arch asset (win-x64 / win-aarch64).
    The zip ships hayabusa-<ver>-win-<arch>.exe + rules/ + config/ — we copy it all and add a hayabusa.exe alias.
    PS is written to a temp .ps1 (run via -File) so quoting/interpolation is unrestricted. */
-function downloadHayabusa(){
+function downloadHayabusa(silent, done){   // silent: skip the confirm (unattended /auto); done(ok): fired after install
   var target=htaFolder()||EXE_DIR;
-  if(!target){ setStatus("Cannot determine the app folder to install into","err"); return; }
-  if(BUSY){ setStatus("A run is in progress — wait for it to finish.","err"); return; }
+  if(!target){ setStatus("Cannot determine the app folder to install into","err"); if(done) done(false); return; }
+  if(BUSY){ setStatus("A run is in progress — wait for it to finish.","err"); if(done) done(false); return; }
   var verForUrl=(WEB_OK&&LATEST_VER)?LATEST_VER:KNOWN_LATEST;
-  if(!confirm("Download the latest Hayabusa and install it next to this app?\n\nInstall folder:\n"+target+"\n\nArchitecture is auto-detected (x64 / aarch64). The rules and config folders are included; refresh them afterwards with 'Update rules'.\n\nProceed?")) return;
+  if(!silent && !confirm("Download the latest Hayabusa and install it next to this app?\n\nInstall folder:\n"+target+"\n\nArchitecture is auto-detected (x64 / aarch64). The rules and config folders are included; refresh them afterwards with 'Update rules'.\n\nProceed?")) return;
   setStatus("Downloading & installing Hayabusa… a console window shows progress (this can take a minute).","muted");
   var fso=new ActiveXObject("Scripting.FileSystemObject");
   var tmp=fso.GetSpecialFolder(2)+"";
@@ -645,10 +697,25 @@ function downloadHayabusa(){
     var r=runBat(['powershell -NoProfile -ExecutionPolicy Bypass -File "'+ps1+'" > "__LOG__" 2>&1'], true);
     appendLog("--- Hayabusa download / install ---\n"+r.log);
     try{ fso.DeleteFile(ps1); }catch(e0){}
-    if((r.log+"").indexOf("INSTALL_OK")>=0){ setStatus("Hayabusa installed to "+target,"ok"); evaluateTooling(false); }
-    else if(confirm("Automatic download failed — see the log (network/proxy, or no matching asset for this architecture).\n\nOpen the Hayabusa releases page to download it manually instead?")) openReleases();
-    else setStatus("Download/install failed — see log","err");
-  }catch(e){ setStatus("Download failed: "+e.message,"err"); }
+    if((r.log+"").indexOf("INSTALL_OK")>=0){ setStatus("Hayabusa installed to "+target,"ok"); evaluateTooling(false); if(done) done(true); }
+    else { if(!silent && confirm("Automatic download failed — see the log (network/proxy, or no matching asset for this architecture).\n\nOpen the Hayabusa releases page to download it manually instead?")) openReleases();
+      else setStatus("Download/install failed — see log","err");
+      if(done) done(false); }
+  }catch(e){ setStatus("Download failed: "+e.message,"err"); if(done) done(false); }
+}
+/* /auto launch: if hayabusa.exe is missing, fetch it (exe + rules + config) first and run in the
+   install callback. The Finder's Process / Process-all fires wrappers unattended, so a missing exe
+   must self-resolve rather than just erroring. Present, or genuinely offline, falls through to the
+   normal run (processHb emits the existing clear "not found" message when offline). */
+function autoProcess(){
+  if(EXE && fileExists(EXE)){ processHb(); return; }
+  if(WEB_OK){
+    setStatus("hayabusa.exe not present - downloading it before this auto run…","muted");
+    appendLog("/auto: hayabusa.exe missing - fetching it before processing");
+    downloadHayabusa(true, function(ok){ if(ok) processHb(); });
+    return;
+  }
+  processHb();   // offline: let processHb surface the existing "not found" error
 }
 
 /* ---------- actions ---------- */
@@ -1176,6 +1243,7 @@ function ingestHayabusa(raw, idx, head, srcLabel){
       xtra:xtra, tactics:(iMitre>=0?parseTactics(cell(rw,iMitre)):[]),
       iocHits:[], noiseHit:false, score:0, tags:[], reasons:[], priority:false
     };
+    var uc=classifyRowUser(rec); rec.userDisp=uc.disp; rec.userIsSys=uc.isSys;   // account parsed from Details (user-filter v1)
     rec.blob=(title+" "+det+" "+extra+" "+comp+" "+channel+" "+eid+" "+rec.ruleId).toLowerCase();
     ROWS.push(rec);
   }
@@ -1184,6 +1252,13 @@ function ingestHayabusa(raw, idx, head, srcLabel){
   setMode("hb");
   var comps=[]; for(var i=0;i<ROWS.length;i++) comps.push(ROWS[i].computer);
   populateComputerFilter(distinctVals(comps));
+  CURUSER="";
+  var users=[]; for(var u2=0;u2<ROWS.length;u2++){ if(ROWS[u2].userDisp) users.push(ROWS[u2].userDisp); }   // distinctVals drops the blanks (no-user rows)
+  populateUserFilter(distinctVals(users));
+  HIDESYS=false; try{ $("hideSys").checked=false; }catch(eh){}
+  var sysN=0; for(var s2=0;s2<ROWS.length;s2++){ if(ROWS[s2].userIsSys) sysN++; }
+  $("hideSysN").innerHTML=nf(sysN);
+  showEl("hideSysWrap", sysN>0);   // only offer the toggle when there is SYSTEM/machine noise to hide
   $("results").className="";
   var span=timeSpanLabel(ROWS);
   $("srcpill").innerHTML=nf(ROWS.length)+" detections &middot; "+esc(srcLabel);
@@ -1228,6 +1303,8 @@ function scoreRec(r){
 function rowHasTactic(r,tac){ for(var i=0;i<r.tactics.length;i++){ if(r.tactics[i]===tac) return true; } return false; }
 function baseFilter(r){
   if(CURCOMP && r.computer!==CURCOMP) return false;
+  if(CURUSER && r.userDisp!==CURUSER) return false;
+  if(HIDESYS && r.userIsSys) return false;
   if(TITLEONLY && r.title!==TITLEONLY) return false;
   if(TACTICONLY && !rowHasTactic(r,TACTICONLY)) return false;
   if(DFROM && (!r.dayTs || r.dayTs<DFROM)) return false;
@@ -1809,7 +1886,7 @@ function renderGeneric(){
 function setMode(m){
   MODE=m; var hb=(m==="hb");
   showEl("hbCards",hb); showEl("lvlCats",hb); showEl("viewToggle",hb); showEl("hbFoot",hb); showEl("iocBtn",hb); showEl("noiseBtn",hb);
-  if(!hb){ showEl("iocWrap",false); showEl("noiseWrap",false); closeDetail(); }
+  if(!hb){ showEl("iocWrap",false); showEl("noiseWrap",false); closeDetail(); showEl("hideSysWrap",false); showEl("userWrap",false); }   // user filters are hb-mode only
   $("ovTitle").innerHTML = hb ? "Overview &mdash; reflects active filters" : "Overview";
   $("tableTitle").innerHTML = hb ? "Detections (chronological)" : "Records";
   $("maxrowLbl").innerHTML = nf(MAXROWS);
@@ -1824,10 +1901,10 @@ function exportView(){
   if(VIEW==="title"){ exportTitle(); return; }
   var rows=window.__fullRows||[];
   if(!rows.length){ setStatus("Nothing to export","err"); return; }
-  var head=["Timestamp_UTC","Level","RuleTitle","Computer","Channel","EventID","RecordID","Details","ExtraFieldInfo","RuleID","Score","IOCHits"];
+  var head=["Timestamp_UTC","Level","RuleTitle","Computer","User","Channel","EventID","RecordID","Details","ExtraFieldInfo","RuleID","Score","IOCHits"];
   var lines=[head.join(",")];
   for(var i=0;i<rows.length;i++){ var r=rows[i];
-    lines.push([cq(r.ts),cq(LVLMETA[r.lkey].name),cq(r.title),cq(r.computer),cq(r.channel),cq(r.eid),cq(r.recordId),
+    lines.push([cq(r.ts),cq(LVLMETA[r.lkey].name),cq(r.title),cq(r.computer),cq(r.userDisp),cq(r.channel),cq(r.eid),cq(r.recordId),
       cq(r.details),cq(r.extra),cq(r.ruleId),cq(r.score),cq(r.iocHits.join("; "))].join(",")); }
   writeExport(lines, "detections");
 }
@@ -2009,7 +2086,7 @@ function applyCli(cli){
   if(cli.auto){
     AUTORUN=true;   // QA F7: suppress the startup Defender modal — it must not pop mid-run during a bulk /auto session
     appendLog("CLI: /auto — processing "+cli.input);
-    window.setTimeout(function(){ processHb(); }, 200);
+    window.setTimeout(function(){ autoProcess(); }, 200);
   } else {
     setStatus("CLI: input prefilled. Click 'Process → analyze' to run.","muted");
   }
@@ -2092,8 +2169,11 @@ function init(){
   $("dfrom").onchange=function(){ DFROM=dayNum(this.value); render(); };
   $("dto").onchange=function(){ DTO=dayNum(this.value); render(); };
   $("compSel").onchange=function(){ CURCOMP=this.value; render(); };
+  $("userSel").onchange=function(){ CURUSER=this.value; render(); };
+  $("hideSys").onclick=function(){ HIDESYS=this.checked; render(); };
   $("clearBtn").onclick=function(){ $("q").value="";$("dfrom").value="";$("dto").value="";$("compSel").value="";
-    QUERY="";DFROM=0;DTO=0;CURCOMP="";CURLVL="all";TITLEONLY="";TACTICONLY=""; renderTitleFilterChip(); highlightLvl(); render(); };
+    QUERY="";DFROM=0;DTO=0;CURCOMP="";CURUSER="";CURLVL="all";TITLEONLY="";TACTICONLY=""; try{ $("userSel").value=""; }catch(eus){} HIDESYS=false; try{ $("hideSys").checked=false; }catch(eh){}
+    renderTitleFilterChip(); highlightLvl(); render(); };
   $("exportBtn").onclick=exportView;
   $("copyBtn").onclick=copyNotes;
 
@@ -2234,6 +2314,7 @@ window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }
     <ul>
       <li><b>Chronological</b> (default), <b>By severity</b>, <b>By rule title</b>, and <b>By ATT&amp;CK tactic</b> (appears when the CSV carries MITRE tactics — run with the <b>verbose</b> profile). Click a tactic or rule to drill into its detections.</li>
       <li>Detail pane: <b>prev / next</b> buttons walk detections in the current view; <b>Mute this rule</b> (in a rule's detail) adds it to the noise list. IOC list, noise/known-FP list built in.</li>
+      <li><b>User filters</b>: the standard profile has no user column, so the account is parsed from the Details blob (SubjectUserName / TargetUserName / User / Src- / TgtUser — coverage varies by Sigma rule). Two complementary controls: <b>(1)</b> the <code>user:</code> dropdown isolates one specific account (lists every distinct parsed account; rows with no user field are never listed); <b>(2)</b> the <b>hide SYSTEM/machine</b> toggle drops rows attributed <i>solely</i> to SYSTEM, LOCAL/NETWORK SERVICE, ANONYMOUS LOGON or machine (<code>$</code>) accounts in bulk (a row with any human account, or none at all, stays; the count shows how many it hides). They AND together, so pick a user, or hide the noise, or both. Each appears only when relevant. The CSV export carries a <b>User</b> column. Treat as a triage aid — for authoritative per-user work, run Hayabusa's verbose profile.</li>
       <li><b>Resizable columns</b> — drag a column-header edge (widths remembered per view); double-click the edge to reset.</li>
     </ul>
     <h3>Command line</h3>
