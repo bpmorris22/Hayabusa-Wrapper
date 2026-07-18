@@ -63,7 +63,7 @@ mshta.exe "Hayabusa-Wrapper.hta" "<input>" ["<outDir>"] [/auto] [/min:LEVEL] [/p
 - **Timestamps are always UTC** (`--ISO-8601`), shown with a `...Z` suffix - deliberately no local-time conversion, so times are unambiguous across analysts and time zones.
 - **The ATT&CK-tactic view needs MITRE data.** Hayabusa only emits the `MitreTactics` column under the **verbose** (or super-verbose) profile - run with that profile, or load a verbose CSV, to populate the view. The standard profile leaves it empty and the view says so.
 - Hayabusa only detects what its **Sigma ruleset** covers and what the collected channels contain - absence of a detection is not absence of activity. Keep rules updated.
-- Large timelines (hundreds of thousands of detections) are display-capped (5,000 rows) on the flat/severity views; **exports write the full filtered set**, and the **By rule title** / **By ATT&CK tactic** views are the scalable lenses.
+- Large timelines (hundreds of thousands of detections) are display-capped (6,000 rows, with an amber "Warning: Maximum Rows Exceeded" chip when the cap bites) on the flat/severity views; **exports write the full filtered set**, and the **By rule title** / **By ATT&CK tactic** views are the scalable lenses.
 - The ` ¦ ` sub-field separator is non-ASCII; running from a **network location** triggers an ANSI fallback that can mojibake it - splitting is handled defensively, but run from a **local** path for full fidelity.
 - Velociraptor URL-encoded paths (`C%3A`) are handled.
 - Hayabusa is arch-specific (**win-x64** vs **win-aarch64**) - pick the matching binary; rules are arch-independent.
