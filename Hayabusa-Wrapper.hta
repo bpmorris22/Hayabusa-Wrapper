@@ -18,10 +18,12 @@
   CONTEXTMENU="yes"
   SELECTION="yes" />
 <!--
-  Hayabusa csv-timeline CSV contract, VERIFIED 2026-07-06 against Hayabusa 3.10.0 "standard" profile
-  (verified on a real csv-timeline export), timestamps via --ISO-8601 (always-UTC "…Z"):
+  Hayabusa timeline CSV contract, VERIFIED 2026-07-06 against Hayabusa 3.10.0 "standard" profile
+  (verified on a real csv-timeline export), timestamps via --ISO-8601 (always-UTC "…Z").
+  RE-VERIFIED 2026-10-01 against 4.1.0 `dfir-timeline` (4.x renamed csv-timeline -> dfir-timeline and
+  --ISO-8601 -> --iso-8601; same columns, minus the trailing EventTime, which ingest treats as optional):
 
-    Timestamp,RuleTitle,Level,Computer,Channel,EventID,RecordID,Details,ExtraFieldInfo,RuleID,EventTime
+    Timestamp,RuleTitle,Level,Computer,Channel,EventID,RecordID,Details,ExtraFieldInfo,RuleID[,EventTime]
       - Timestamp / EventTime : RFC-3339 UTC, sub-second, "…Z"
       - Level                 : abbreviated  crit / high / med / low / info
       - Channel               : abbreviated (Hayabusa config/channel_abbreviations.txt)
@@ -33,9 +35,10 @@
   Non-timeline Hayabusa CSVs (logon-summary, metrics) fall back to the generic grid.
 
   RUN GOTCHAS:
-   * --no-wizard is MANDATORY — without it csv-timeline blocks on the interactive rule wizard and the
+   * --no-wizard is MANDATORY — without it the timeline run blocks on the interactive rule wizard and the
      async console never returns (pollDone would hang forever).
-   * We force --ISO-8601 (always UTC "…Z") so times are unambiguous (avoids the analysis-box-local-time class of error).
+   * We force --iso-8601 / 3.x --ISO-8601 (always UTC "…Z") so times are unambiguous (avoids the analysis-box-local-time class of error).
+     Subcommand + flag spelling are picked from the detected version (timelineSub / isLegacyHb).
      NB: in 3.x -R means --remove-duplicate-data (NOT RFC-3339) and there is no -V/-h (version = line 1 of `hayabusa help`).
    * hayabusa.exe needs sibling rules/ and config/ folders. We run `update-rules` before processing by default.
    * Native Rust exe — no .NET / DOTNET_ROLL_FORWARD needed. Binary is arch-specific (win-x64 vs win-aarch64).
@@ -155,7 +158,7 @@
         <option value="d">directory (recursive)</option><option value="f">single .evtx file</option></select>
       &nbsp;<label style="font-size:12px" title="Update the Sigma detection rules (hayabusa update-rules) immediately before running the timeline. Strongly recommended. Non-fatal if offline — the run then uses the rules already on disk.">
         <input type="checkbox" id="optUpd" checked> update rules first</label>
-      &nbsp;<span class="muted" style="font-size:11px" title="Timestamps are always emitted as UTC ISO-8601 (…Z) via --ISO-8601 so times are unambiguous and parse consistently.">times: UTC ISO-8601</span>
+      &nbsp;<span class="muted" style="font-size:11px" title="Timestamps are always emitted as UTC ISO-8601 (…Z) via --iso-8601 so times are unambiguous and parse consistently.">times: UTC ISO-8601</span>
       &nbsp;<label style="font-size:12px" title="-q: quiet console (suppress the banner).">
         <input type="checkbox" id="optQuiet"> quiet</label>
       &nbsp;<label class="muted" style="font-size:12px">min level
@@ -190,7 +193,7 @@
       <button class="btn" id="getBtn" title="Download &amp; install the latest Hayabusa next to this app (arch auto-detected: win-x64 / win-aarch64; rules + config included).">Download Hayabusa</button>
       <span class="sep"></span>
       <button class="btn primary" id="procBtn">Process &rarr; analyze</button>
-      <button class="btn" id="loadBtn" title="Browse to a Hayabusa csv-timeline CSV produced earlier (e.g. in an Exported CSVs folder) and load it straight into the triage views — no need to re-process the raw .evtx.">Load processed CSV&hellip;</button>
+      <button class="btn" id="loadBtn" title="Browse to a Hayabusa timeline CSV (dfir-timeline / 3.x csv-timeline) produced earlier (e.g. in an Exported CSVs folder) and load it straight into the triage views — no need to re-process the raw .evtx.">Load processed CSV&hellip;</button>
       <input type="file" id="csvPick" style="display:none">
       <span class="sep"></span>
       <button class="btn" id="logonBtn" title="Run 'hayabusa logon-summary' on the input and load the result into the grid — great for BEC / lateral-movement triage.">Logon summary</button>
@@ -291,8 +294,8 @@
 <script language="JScript">
 "use strict";
 
-var APP_VERSION = "0.11.2";
-var KNOWN_LATEST = "3.10.0";                                                       // offline-fallback baseline as of 2026-07-08
+var APP_VERSION = "0.12.0";
+var KNOWN_LATEST = "4.1.0";                                                        // offline-fallback baseline as of 2026-10-01
 var HB_RELEASES_PAGE = "https://github.com/Yamato-Security/hayabusa/releases";
 var HB_API_LATEST = "https://api.github.com/repos/Yamato-Security/hayabusa/releases/latest";
 var LIVE_LOGS = "C:\\Windows\\System32\\winevt\\Logs";
@@ -866,10 +869,15 @@ function canListFolder(p){
     var e=new Enumerator(fso.GetFolder(p).Files); e.atEnd(); return true; }catch(err){ return false; }
 }
 
+/* Hayabusa 4.x renamed csv-timeline/json-timeline -> dfir-timeline (CSV is still the default -t) and
+   lower-cased --ISO-8601 -> --iso-8601; both old spellings are hard clap errors on 4.x. Gate on the
+   detected major so a 3.x install keeps its verified command; unknown version = assume current (4.x). */
+function isLegacyHb(){ return !!LOCAL_VER && verCmp(LOCAL_VER,"4.0.0")<0; }
+function timelineSub(){ return isLegacyHb()?"csv-timeline":"dfir-timeline"; }
 function buildTimelineCmd(inp, inmode, csvOut){
   var flag=(inmode==="d")?"-d":"-f";
-  // --no-wizard: non-interactive (mandatory). --ISO-8601: always-UTC "…Z" timestamps (matches parser + sample). -C clobber. -K no ANSI in log.
-  var extra=" --no-wizard -C --ISO-8601 --no-color";
+  // --no-wizard: non-interactive (mandatory). --iso-8601: always-UTC "…Z" timestamps (matches parser + sample). -C clobber. -K no ANSI in log.
+  var extra=" --no-wizard -C "+(isLegacyHb()?"--ISO-8601":"--iso-8601")+" --no-color";
   if($("optQuiet").checked) extra+=" -q";
   var mn=$("optMin").value; if(mn && mn!=="informational") extra+=" -m "+mn;
   var pf=$("optProfile").value; if(pf && pf!=="standard") extra+=" -p "+pf;
@@ -877,7 +885,7 @@ function buildTimelineCmd(inp, inmode, csvOut){
   if($("optProven") && $("optProven").checked) extra+=" -P";
   LAST_HTML="";
   if($("optHtml") && $("optHtml").checked){ var htmlOut=String(csvOut).replace(/\.csv$/i,".html"); LAST_HTML=htmlOut; extra+=' -H "'+batEsc(htmlOut)+'"'; }
-  return '"'+batEsc(EXE)+'" csv-timeline '+flag+' "'+batEsc(inp)+'" -o "'+batEsc(csvOut)+'"'+extra;
+  return '"'+batEsc(EXE)+'" '+timelineSub()+' '+flag+' "'+batEsc(inp)+'" -o "'+batEsc(csvOut)+'"'+extra;
 }
 /* ---------- target hostname + _Processed output convention (family, 2026-07-06) ----------
    All processed output lands in <appFolder>\_Processed\<Hostname>\<AppName>\ so the
@@ -1058,13 +1066,15 @@ function processHbDone(log,outdir,csvOut){
     patchRunInfoSummary(buildRunSummary());   // rows are ingested now — add the severity headline to the runinfo entry
     return;
   }
-  // no output — diagnose
-  if(/no such|not found|does not exist/i.test(log) && /evtx/i.test(log))
+  // no output — diagnose. CLI-rejection first: clap's usage line echoes "--no-wizard", which the wizard test would misread
+  if(/unrecognized subcommand|unexpected argument/i.test(log))
+    setStatus("This Hayabusa build rejected the command line (subcommand/flag renamed?) - see the log; clap's 'tip:' line names the new spelling.","err");
+  else if(/no such|not found|does not exist/i.test(log) && /evtx/i.test(log))
     setStatus("Hayabusa found no .evtx to parse in that input. Check the path.","err");
   else if(/denied|permission/i.test(log))
     setStatus("Hayabusa was denied access — an elevated run is needed for live logs.","err");
   else if(/wizard/i.test(log))
-    setStatus("Hayabusa appears to have hit the interactive wizard — the --no-wizard flag may be unsupported by this build. Run 'hayabusa csv-timeline -h' and check the flag name.","err");
+    setStatus("Hayabusa appears to have hit the interactive wizard — the --no-wizard flag may be unsupported by this build. Run 'hayabusa "+timelineSub()+" -h' and check the flag name.","err");
   else
     setStatus("Hayabusa produced no CSV — see the log for why.","err");
   populateProduced(listCsvFiles(outdir));
@@ -1859,7 +1869,7 @@ function ingestGeneric(raw, head, srcLabel){
   $("srcpill").innerHTML=nf(GROWS.length)+" rows &middot; "+esc(srcLabel)+" ("+GHEAD.length+" cols)";
   QUERY=""; $("q").value=""; GSORTKEY=-1;
   closeDetail();
-  setStatus("Loaded "+nf(GROWS.length)+" rows (generic table — not a csv-timeline output)","ok");
+  setStatus("Loaded "+nf(GROWS.length)+" rows (generic table — not a Hayabusa timeline output)","ok");
   renderGeneric();
 }
 function renderGeneric(){
@@ -2315,7 +2325,7 @@ window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }
     <span class="x" onclick="closeHelp()" title="Close">&times;</span>
     <h2>Hayabusa Wrapper <span class="muted" style="font-size:13px;font-weight:400" id="helpVer"></span></h2>
     <div class="gh muted">GitHub: <span class="lnk" onclick="openUrl(GITHUB)">https://github.com/bpmorris22/Hayabusa-Wrapper</span></div>
-    <p>A single-file GUI for triaging <b>Windows event logs</b> with Yamato-Security Hayabusa — runs <code>csv-timeline</code> for you and turns the Sigma-detection CSV into an interactive, severity-aware triage view.</p>
+    <p>A single-file GUI for triaging <b>Windows event logs</b> with Yamato-Security Hayabusa — runs <code>dfir-timeline</code> (<code>csv-timeline</code> on 3.x) for you and turns the Sigma-detection CSV into an interactive, severity-aware triage view.</p>
     <h3>Quick start</h3>
     <ul>
       <li>Put this <code>.hta</code> next to <code>hayabusa.exe</code> (with its <code>rules\</code> + <code>config\</code>), or use <b>Download Hayabusa</b>. Refresh detections with <b>Update rules</b>.</li>
@@ -2341,7 +2351,7 @@ window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }
     </ul>
     <h3>Notes</h3>
     <ul>
-      <li>Runs <code>--no-wizard --ISO-8601</code> (non-interactive, always-UTC <code>…Z</code>) and updates rules first by default. Validated against Hayabusa 3.10.0.</li>
+      <li>Runs <code>--no-wizard --iso-8601</code> (non-interactive, always-UTC <code>…Z</code>) and updates rules first by default. Validated against Hayabusa 4.1.0 (and 3.10.0 - the 3.x <code>csv-timeline</code> / <code>--ISO-8601</code> spelling is picked automatically).</li>
       <li><b>Defender:</b> Sigma rule files contain attack-signature text and can be flagged during rule updates — on startup the app checks for a Defender path exclusion covering the Hayabusa folder and offers to add one (UAC prompt).</li>
       <li><b>HTML report</b> checkbox writes Hayabusa's own <code>-H</code> summary next to the CSV (then <b>Open HTML report</b>). <b>Logon summary</b> / <b>EID metrics</b> run those Hayabusa subcommands into the grid. <b>Open in Timeline Explorer</b> hands the loaded CSV to TLE. Exports are named <code>&lt;host&gt;_…</code> and land beside the source.</li>
     </ul>

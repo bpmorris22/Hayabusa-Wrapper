@@ -2,7 +2,7 @@
 
 A single-file, double-clickable **and command-line-invokable** GUI for triaging **Windows event logs** with [Yamato-Security Hayabusa](https://github.com/Yamato-Security/hayabusa), built for DFIR casework.
 
-No install, no dependencies, no framework: one `.hta` that runs on any Windows box via the built-in `mshta.exe`. Point it at a live machine, a single `.evtx`, or a KAPE/Velociraptor collection tree; it runs `hayabusa csv-timeline` for you and turns the Sigma-detection CSV into an interactive, severity-aware triage view.
+No install, no dependencies, no framework: one `.hta` that runs on any Windows box via the built-in `mshta.exe`. Point it at a live machine, a single `.evtx`, or a KAPE/Velociraptor collection tree; it runs `hayabusa dfir-timeline` for you and turns the Sigma-detection CSV into an interactive, severity-aware triage view.
 
 ![Analysis view](images/analysis-screen.png)
 
@@ -12,7 +12,7 @@ No install, no dependencies, no framework: one `.hta` that runs on any Windows b
 
 ## Features
 
-- **Runs Hayabusa for you** - file or recursive-directory mode; **updates the Sigma rules first by default** (`update-rules`), then runs `csv-timeline`. Async visible console so the UI never freezes. Forces `--no-wizard` (non-interactive), `--ISO-8601` (always-UTC `...Z` timestamps) and `-C` (clobber). Min-level defaults to **informational = see everything**. A **profile** selector (standard / verbose / super-verbose) controls how much context each detection carries.
+- **Runs Hayabusa for you** - file or recursive-directory mode; **updates the Sigma rules first by default** (`update-rules`), then runs `dfir-timeline`. Async visible console so the UI never freezes. Forces `--no-wizard` (non-interactive), `--iso-8601` (always-UTC `...Z` timestamps) and `-C` (clobber). Works with **Hayabusa 4.x** and **3.x** - 4.x renamed `csv-timeline` -> `dfir-timeline` and `--ISO-8601` -> `--iso-8601`; the wrapper picks the right spelling from the detected version. Min-level defaults to **informational = see everything**. A **profile** selector (standard / verbose / super-verbose) controls how much context each detection carries.
 - **Four synchronized views** of the same filtered set:
   - **Chronological** (default) - every detection, newest first.
   - **By severity** - collapsible Critical -> High -> Medium -> Low -> Informational groups (Critical/High expanded by default).
@@ -41,7 +41,7 @@ No install, no dependencies, no framework: one `.hta` that runs on any Windows b
    - a collected `winevt\Logs` (or any `.evtx` tree) from a KAPE / Velociraptor collection,
    - or a single `.evtx`.
    - Tick **verbose** in the profile selector to populate the **By ATT&CK tactic** view.
-4. Or **Load existing CSV...** to analyze a Hayabusa `csv-timeline` CSV you already have. Non-timeline CSVs (logon-summary, metrics) open in a generic sortable grid.
+4. Or **Load existing CSV...** to analyze a Hayabusa timeline CSV (`dfir-timeline`, or 3.x `csv-timeline`) you already have. Non-timeline CSVs (logon-summary, metrics) open in a generic sortable grid.
 
 ## Command line
 
@@ -60,7 +60,7 @@ mshta.exe "Hayabusa-Wrapper.hta" "<input>" ["<outDir>"] [/auto] [/min:LEVEL] [/p
 
 ## Notes & limitations
 
-- **Timestamps are always UTC** (`--ISO-8601`), shown with a `...Z` suffix - deliberately no local-time conversion, so times are unambiguous across analysts and time zones.
+- **Timestamps are always UTC** (`--iso-8601`), shown with a `...Z` suffix - deliberately no local-time conversion, so times are unambiguous across analysts and time zones.
 - **The ATT&CK-tactic view needs MITRE data.** Hayabusa only emits the `MitreTactics` column under the **verbose** (or super-verbose) profile - run with that profile, or load a verbose CSV, to populate the view. The standard profile leaves it empty and the view says so.
 - Hayabusa only detects what its **Sigma ruleset** covers and what the collected channels contain - absence of a detection is not absence of activity. Keep rules updated.
 - Large timelines (hundreds of thousands of detections) are display-capped (6,000 rows, with an amber "Warning: Maximum Rows Exceeded" chip when the cap bites) on the flat/severity views; **exports write the full filtered set**, and the **By rule title** / **By ATT&CK tactic** views are the scalable lenses.
